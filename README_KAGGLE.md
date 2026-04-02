@@ -3,6 +3,12 @@
 This document is the dedicated runbook for the Kaggle competition pipeline in this repo.
 It supports **Track1 + Track2 joint training/inference** with a shared backbone and independent task heads.
 
+Default keypoint setting uses **65 non-face points** from COCO-WholeBody:
+
+- body + feet: `0..22`
+- both hands: `91..132`
+- face (`23..90`) is excluded
+
 ## 1. Expected File Layout
 
 Place all competition files inside `EfficientGCNv1`:
@@ -103,4 +109,3 @@ From `configs/track12_multitask_b0.yaml`:
   - Run training first, or point `--folds` to existing fold ids.
 - Kaggle says `Submission contains null values`
   - Re-run `make_submission` with the latest code; unnamed columns are auto-cleaned.
-

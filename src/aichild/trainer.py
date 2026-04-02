@@ -140,7 +140,7 @@ def train_cv(config: dict, cv_folds: int, max_epochs: int = -1) -> Dict[str, obj
         raise ValueError("No track2 train subjects found in manifest.")
 
     folds = _split_subject_folds(track2_train_subjects, cv_folds, int(train_cfg["seed"]))
-    graph = AichildGraph()
+    graph = AichildGraph(keypoint_indices=data_cfg["keypoint_indices"])
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logging.info("Training device: %s", device)

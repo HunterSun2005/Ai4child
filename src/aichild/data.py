@@ -456,6 +456,13 @@ class AichildClipDataset(Dataset):
         row = self.rows[index]
         data = np.load(row["cache_path"])
         joint = data["joint"].astype(np.float32)  # (2, T, V, 1)
+        expected_v = len(self.graph.connect_joint)
+        if joint.shape[2] != expected_v:
+            raise ValueError(
+                "Cached keypoint dimension mismatch: "
+                f"got V={joint.shape[2]}, expected V={expected_v}. "
+                "Please rerun preprocess with --overwrite after changing keypoint_indices."
+            )
 
         if self.options.train:
             joint_main = self._augment_joint(joint)

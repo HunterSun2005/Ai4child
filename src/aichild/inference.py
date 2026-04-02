@@ -105,7 +105,7 @@ def predict_multitask(
     if len(test_rows) == 0:
         raise ValueError(f"No test rows found in manifest for task={task}.")
 
-    graph = AichildGraph()
+    graph = AichildGraph(keypoint_indices=data_cfg["keypoint_indices"])
     ds = AichildClipDataset(
         test_rows,
         graph,

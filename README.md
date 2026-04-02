@@ -178,6 +178,7 @@ Please cite our paper when you use this code in your reseach.
 This repo now includes a dedicated multitask pipeline for the Kaggle challenge:
 - Track1: bilateral gait pattern signs (17 left + 17 right binary labels)
 - Track2: gait subtype classification (`type1/type2/type3/type4/WNL`)
+- Default keypoints: non-face COCO-WholeBody (`0..22` + `91..132`, total 65)
 
 Entry script:
 ```
