@@ -1,0 +1,200 @@
+[
+    {
+        "patient_id": 1,
+        "left": {
+            "gait_subtype": "type3"
+        },
+        "right": {
+            "gait_subtype": "type3"
+        }
+    },
+    {
+        "patient_id": 5,
+        "left": {
+            "gait_subtype": "type3"
+        },
+        "right": {
+            "gait_subtype": "type3"
+        }
+    },
+    {
+        "patient_id": 12,
+        "left": {
+            "gait_subtype": "type3"
+        },
+        "right": {
+            "gait_subtype": "type3"
+        }
+    },
+    {
+        "patient_id": 18,
+        "left": {
+            "gait_subtype": "type2"
+        },
+        "right": {
+            "gait_subtype": "type2"
+        }
+    },
+    {
+        "patient_id": 21,
+        "left": {
+            "gait_subtype": "type2"
+        },
+        "right": {
+            "gait_subtype": "type2"
+        }
+    },
+    {
+        "patient_id": 22,
+        "left": {
+            "gait_subtype": "WNL"
+        },
+        "right": {
+            "gait_subtype": "WNL"
+        }
+    },
+    {
+        "patient_id": 23,
+        "left": {
+            "gait_subtype": "type1"
+        },
+        "right": {
+            "gait_subtype": "type1"
+        }
+    },
+    {
+        "patient_id": 24,
+        "left": {
+            "gait_subtype": "type1"
+        },
+        "right": {
+            "gait_subtype": "type1"
+        }
+    },
+    {
+        "patient_id": 27,
+        "left": {
+            "gait_subtype": "type1"
+        },
+        "right": {
+            "gait_subtype": "type1"
+        }
+    },
+    {
+        "patient_id": 29,
+        "left": {
+            "gait_subtype": "type2"
+        },
+        "right": {
+            "gait_subtype": "type2"
+        }
+    },
+    {
+        "patient_id": 30,
+        "left": {
+            "gait_subtype": "type3"
+        },
+        "right": {
+            "gait_subtype": "type3"
+        }
+    },
+    {
+        "patient_id": 32,
+        "left": {
+            "gait_subtype": "type2"
+        },
+        "right": {
+            "gait_subtype": "type3"
+        }
+    },
+    {
+        "patient_id": 33,
+        "left": {
+            "gait_subtype": "type3"
+        },
+        "right": {
+            "gait_subtype": "type3"
+        }
+    },
+    {
+        "patient_id": 36,
+        "left": {
+            "gait_subtype": "type1"
+        },
+        "right": {
+            "gait_subtype": "type1"
+        }
+    },
+    {
+        "patient_id": 47,
+        "left": {
+            "gait_subtype": "type1"
+        },
+        "right": {
+            "gait_subtype": "type1"
+        }
+    },
+    {
+        "patient_id": 48,
+        "left": {
+            "gait_subtype": "type1"
+        },
+        "right": {
+            "gait_subtype": "type3"
+        }
+    },
+    {
+        "patient_id": 52,
+        "left": {
+            "gait_subtype": "type4"
+        },
+        "right": {
+            "gait_subtype": "type4"
+        }
+    },
+    {
+        "patient_id": 53,
+        "left": {
+            "gait_subtype": "type3"
+        },
+        "right": {
+            "gait_subtype": "type3"
+        }
+    },
+    {
+        "patient_id": 55,
+        "left": {
+            "gait_subtype": "type2"
+        },
+        "right": {
+            "gait_subtype": "type2"
+        }
+    },
+    {
+        "patient_id": 57,
+        "left": {
+            "gait_subtype": "type2"
+        },
+        "right": {
+            "gait_subtype": "type2"
+        }
+    },
+    {
+        "patient_id": 63,
+        "left": {
+            "gait_subtype": "type2"
+        },
+        "right": {
+            "gait_subtype": "type2"
+        }
+    },
+    {
+        "patient_id": 64,
+        "left": {
+            "gait_subtype": "type2"
+        },
+        "right": {
+            "gait_subtype": "type2"
+        }
+    }
+]

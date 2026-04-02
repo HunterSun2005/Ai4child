@@ -172,3 +172,38 @@ Please cite our paper when you use this code in your reseach.
   doi       = {10.1145/3394171.3413802},
 }
 ```
+
+## 7 AIChild Track1+Track2 Multitask Pipeline
+
+This repo now includes a dedicated multitask pipeline for the Kaggle challenge:
+- Track1: bilateral gait pattern signs (17 left + 17 right binary labels)
+- Track2: gait subtype classification (`type1/type2/type3/type4/WNL`)
+
+Entry script:
+```
+python track12_main.py -c configs/track12_multitask_b0.yaml <command>
+```
+
+Supported commands:
+1. Preprocess (build cache + manifest)
+```
+python track12_main.py preprocess
+```
+2. Train (5-fold CV by default)
+```
+python track12_main.py train --cv 5
+```
+3. Predict (ensemble all trained folds)
+```
+python track12_main.py predict --folds all --task both
+```
+4. Make submission (fills both `track1-*` and `track2-*` rows in template)
+```
+python track12_main.py make_submission
+```
+
+Config file:
+`configs/track12_multitask_b0.yaml`
+
+Detailed Kaggle instructions:
+`README_KAGGLE.md`
