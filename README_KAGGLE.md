@@ -51,11 +51,31 @@ Optional smoke test:
 python track12_main.py preprocess --max_clips 20
 ```
 
+PCA ablation example:
+
+```bash
+python track12_main.py preprocess --use_pca on --pca_components 32
+```
+
+When PCA is enabled, preprocessing also fits and saves a PCA model.
+
 ### 3.2 Train (5-fold by default)
 
 ```bash
 python track12_main.py train --cv 5
 ```
+
+PCA ablation example:
+
+```bash
+python track12_main.py train --cv 5 --use_pca on --pca_components 32
+```
+
+Each fold now saves **two task-specific best checkpoints**:
+
+- `best_track1.pt`: selected by Track1 validation metric (`mean_f1`)
+- `best_track2.pt`: selected by Track2 validation metric (`mean_acc`)
+- `best.pt`: compatibility alias (same as `best_track2.pt`)
 
 ### 3.3 Predict
 
@@ -63,6 +83,27 @@ Predict both tracks with all available folds:
 
 ```bash
 python track12_main.py predict --folds all --task both
+```
+
+If training used PCA, prediction should use the same PCA setting:
+
+```bash
+python track12_main.py predict --folds all --task both --use_pca on --pca_components 32
+```
+
+Default checkpoint policy is `separate`:
+
+- Track1 inference uses `best_track1.pt`
+- Track2 inference uses `best_track2.pt`
+
+You can switch policy explicitly:
+
+```bash
+# recommended: task-specific selection
+python track12_main.py predict --folds all --task both --checkpoint_policy separate
+
+# legacy behavior: both tasks use track2-selected checkpoints
+python track12_main.py predict --folds all --task both --checkpoint_policy shared
 ```
 
 Task options:
@@ -97,9 +138,17 @@ From `configs/track12_multitask_b0.yaml`:
 - `paths.dataset_root: ./dataset`
 - `paths.track1_label: ./train/track1_train.json`
 - `paths.track2_label: ./train/track2_train.json`
+- `paths.pca_model_path: ./workdir/aichild_track12/pca_joint_model.npz`
 - `paths.submission_template: ./submissions/submission_template.csv`
 - `paths.work_dir: ./workdir/aichild_track12`
 - `paths.submission_output: ./submissions/submission_track12.csv`
+
+PCA config:
+
+- `data.pca.enabled`: whether to enable PCA reduction+reconstruction (keeps original graph/keypoint size for GCN compatibility)
+- `data.pca.n_components`: PCA latent dimension (for 65 keypoints, common trials: `16/24/32/48`)
+- `data.pca.fit_on`: `non_test` / `labeled` / `all`
+- `data.pca.frames_per_clip`: sampled frames per clip used to fit PCA
 
 ## 6. Troubleshooting
 

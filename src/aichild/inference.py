@@ -30,27 +30,49 @@ def _to_device(batch: dict, device) -> dict:
     return moved
 
 
-def _resolve_fold_checkpoints(work_dir: str, folds: str) -> List[str]:
+def _resolve_fold_checkpoint_map(
+    work_dir: str,
+    folds: str,
+    preferred_name: str,
+    fallback_name: str = "best.pt",
+) -> Dict[int, str]:
     if folds == "all":
-        paths = []
+        fold_ids = []
         for name in sorted(os.listdir(work_dir)):
             if not name.startswith("fold_"):
                 continue
-            ckpt = os.path.join(work_dir, name, "best.pt")
-            if os.path.exists(ckpt):
-                paths.append(ckpt)
-        if not paths:
-            raise FileNotFoundError(f"No fold checkpoints found under {work_dir}")
-        return paths
+            suffix = name.split("fold_", 1)[1]
+            if not suffix.isdigit():
+                continue
+            fold_ids.append(int(suffix))
+        if not fold_ids:
+            raise FileNotFoundError(f"No fold_* directories found under {work_dir}")
+    else:
+        fold_ids = [int(x.strip()) for x in folds.split(",") if x.strip()]
+        if not fold_ids:
+            raise ValueError("No valid fold ids parsed from --folds")
 
-    ids = [int(x.strip()) for x in folds.split(",") if x.strip()]
-    paths = []
-    for fid in ids:
-        ckpt = os.path.join(work_dir, f"fold_{fid}", "best.pt")
-        if not os.path.exists(ckpt):
-            raise FileNotFoundError(f"Missing checkpoint: {ckpt}")
-        paths.append(ckpt)
-    return paths
+    checkpoint_map: Dict[int, str] = {}
+    for fid in sorted(fold_ids):
+        fold_dir = os.path.join(work_dir, f"fold_{fid}")
+        candidates = [preferred_name]
+        if fallback_name and fallback_name not in candidates:
+            candidates.append(fallback_name)
+
+        chosen = ""
+        for name in candidates:
+            p = os.path.join(fold_dir, name)
+            if os.path.exists(p):
+                chosen = p
+                break
+
+        if not chosen:
+            raise FileNotFoundError(
+                f"Missing checkpoint for fold {fid}: tried {candidates} under {fold_dir}"
+            )
+        checkpoint_map[fid] = chosen
+
+    return checkpoint_map
 
 
 def _collect_test_rows(
@@ -78,23 +100,104 @@ def _mean_or_empty(items: List[np.ndarray], empty_dim: int) -> np.ndarray:
     return np.mean(items, axis=0).astype(np.float32)
 
 
+def _run_inference_for_checkpoints(
+    config: dict,
+    graph: AichildGraph,
+    loader,
+    checkpoint_map: Dict[int, str],
+    device,
+    collect_track1: bool,
+    collect_track2: bool,
+) -> Tuple[List[Dict[int, dict]], List[str]]:
+    from .model import MultiTaskEfficientGCN
+
+    fold_results: List[Dict[int, dict]] = []
+    used_checkpoints: List[str] = []
+
+    for fid in sorted(checkpoint_map.keys()):
+        ckpt_path = checkpoint_map[fid]
+        checkpoint = torch.load(ckpt_path, map_location="cpu")
+        model = MultiTaskEfficientGCN(config, graph).to(device)
+        model.load_state_dict(checkpoint["model"], strict=True)
+        model.eval()
+
+        t1_left_by_subject = defaultdict(list)
+        t1_right_by_subject = defaultdict(list)
+        t2_left_by_subject = defaultdict(list)
+        t2_right_by_subject = defaultdict(list)
+
+        with torch.no_grad():
+            desc = f"Predict fold_{fid}"
+            for batch in tqdm(loader, desc=desc, dynamic_ncols=True):
+                batch = _to_device(batch, device)
+                outputs = model(batch["x"].float(), batch["direction"].float())
+
+                p_t1_left = p_t1_right = None
+                p_t2_left = p_t2_right = None
+                if collect_track1:
+                    p_t1_left = torch.sigmoid(outputs["track1_left"]).cpu().numpy()
+                    p_t1_right = torch.sigmoid(outputs["track1_right"]).cpu().numpy()
+                if collect_track2:
+                    p_t2_left = torch.softmax(outputs["track2_left"], dim=1).cpu().numpy()
+                    p_t2_right = torch.softmax(outputs["track2_right"], dim=1).cpu().numpy()
+
+                bsz = batch["x"].shape[0]
+                for i in range(bsz):
+                    sid = int(batch["subject_id"][i].item())
+                    if collect_track1:
+                        t1_left_by_subject[sid].append(p_t1_left[i])
+                        t1_right_by_subject[sid].append(p_t1_right[i])
+                    if collect_track2:
+                        t2_left_by_subject[sid].append(p_t2_left[i])
+                        t2_right_by_subject[sid].append(p_t2_right[i])
+
+        all_subjects = sorted(
+            set(t1_left_by_subject.keys())
+            | set(t1_right_by_subject.keys())
+            | set(t2_left_by_subject.keys())
+            | set(t2_right_by_subject.keys())
+        )
+        fold_subject_result: Dict[int, dict] = {}
+        for sid in all_subjects:
+            item = {}
+            if collect_track1:
+                item["track1_left_prob"] = _mean_or_empty(t1_left_by_subject[sid], empty_dim=17).tolist()
+                item["track1_right_prob"] = _mean_or_empty(t1_right_by_subject[sid], empty_dim=17).tolist()
+            if collect_track2:
+                item["track2_left_prob"] = _mean_or_empty(t2_left_by_subject[sid], empty_dim=5).tolist()
+                item["track2_right_prob"] = _mean_or_empty(t2_right_by_subject[sid], empty_dim=5).tolist()
+            fold_subject_result[sid] = item
+
+        fold_results.append(fold_subject_result)
+        used_checkpoints.append(ckpt_path)
+
+    return fold_results, used_checkpoints
+
+
 def predict_multitask(
     config: dict,
     folds: str = "all",
     output_path: str = "",
     task: str = "both",
+    checkpoint_policy: str = "separate",
 ) -> Dict[str, dict]:
     if torch is None or DataLoader is None:
         raise ImportError("PyTorch is required for prediction.")
-    from .model import MultiTaskEfficientGCN
 
     if task not in {"track1", "track2", "both"}:
         raise ValueError(f"Unsupported task={task}")
+    if checkpoint_policy not in {"shared", "separate"}:
+        raise ValueError(f"Unsupported checkpoint_policy={checkpoint_policy}")
 
     paths_cfg = config["paths"]
     data_cfg = config["data"]
     train_cfg = config["train"]
     comp_cfg = config["competition"]
+    pca_cfg = data_cfg.get("pca", {})
+    use_pca = bool(pca_cfg.get("enabled", False))
+    pca_model_path = os.path.abspath(
+        paths_cfg.get("pca_model_path", "") or os.path.join(paths_cfg["work_dir"], "pca_joint_model.npz")
+    )
 
     track1_test_ids = set(int(x) for x in comp_cfg.get("track1_test_ids", []))
     track2_test_ids = set(int(x) for x in comp_cfg.get("track2_test_ids", []))
@@ -117,6 +220,8 @@ def predict_multitask(
             return_ssl=False,
             jitter_std=0.0,
             temporal_crop_min=1.0,
+            use_pca=use_pca,
+            pca_model_path=pca_model_path,
         ),
     )
     loader = DataLoader(
@@ -128,55 +233,24 @@ def predict_multitask(
     )
 
     work_dir = os.path.abspath(paths_cfg["work_dir"])
-    checkpoints = _resolve_fold_checkpoints(work_dir, folds)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    fold_results: List[Dict[int, dict]] = []
-    for ckpt_path in checkpoints:
-        checkpoint = torch.load(ckpt_path, map_location="cpu")
-        model = MultiTaskEfficientGCN(config, graph).to(device)
-        model.load_state_dict(checkpoint["model"], strict=True)
-        model.eval()
+    track1_ckpt_map = {}
+    track2_ckpt_map = {}
+    if task in {"track1", "both"}:
+        if checkpoint_policy == "shared":
+            track1_ckpt_map = _resolve_fold_checkpoint_map(
+                work_dir, folds, preferred_name="best_track2.pt", fallback_name="best.pt"
+            )
+        else:
+            track1_ckpt_map = _resolve_fold_checkpoint_map(
+                work_dir, folds, preferred_name="best_track1.pt", fallback_name="best.pt"
+            )
 
-        # subject_id -> list of clip-level probs
-        t1_left_by_subject = defaultdict(list)
-        t1_right_by_subject = defaultdict(list)
-        t2_left_by_subject = defaultdict(list)
-        t2_right_by_subject = defaultdict(list)
-
-        with torch.no_grad():
-            fold_name = os.path.basename(os.path.dirname(ckpt_path))
-            for batch in tqdm(loader, desc=f"Predict {fold_name}", dynamic_ncols=True):
-                batch = _to_device(batch, device)
-                outputs = model(batch["x"].float(), batch["direction"].float())
-
-                p_t1_left = torch.sigmoid(outputs["track1_left"]).cpu().numpy()
-                p_t1_right = torch.sigmoid(outputs["track1_right"]).cpu().numpy()
-                p_t2_left = torch.softmax(outputs["track2_left"], dim=1).cpu().numpy()
-                p_t2_right = torch.softmax(outputs["track2_right"], dim=1).cpu().numpy()
-
-                for i in range(p_t1_left.shape[0]):
-                    sid = int(batch["subject_id"][i].item())
-                    t1_left_by_subject[sid].append(p_t1_left[i])
-                    t1_right_by_subject[sid].append(p_t1_right[i])
-                    t2_left_by_subject[sid].append(p_t2_left[i])
-                    t2_right_by_subject[sid].append(p_t2_right[i])
-
-        fold_subject_result: Dict[int, dict] = {}
-        all_subjects = sorted(
-            set(t1_left_by_subject.keys())
-            | set(t1_right_by_subject.keys())
-            | set(t2_left_by_subject.keys())
-            | set(t2_right_by_subject.keys())
+    if task in {"track2", "both"}:
+        track2_ckpt_map = _resolve_fold_checkpoint_map(
+            work_dir, folds, preferred_name="best_track2.pt", fallback_name="best.pt"
         )
-        for sid in all_subjects:
-            fold_subject_result[sid] = {
-                "track1_left_prob": _mean_or_empty(t1_left_by_subject[sid], empty_dim=17).tolist(),
-                "track1_right_prob": _mean_or_empty(t1_right_by_subject[sid], empty_dim=17).tolist(),
-                "track2_left_prob": _mean_or_empty(t2_left_by_subject[sid], empty_dim=5).tolist(),
-                "track2_right_prob": _mean_or_empty(t2_right_by_subject[sid], empty_dim=5).tolist(),
-            }
-        fold_results.append(fold_subject_result)
 
     merged = defaultdict(
         lambda: {
@@ -186,12 +260,60 @@ def predict_multitask(
             "track2_right_prob": [],
         }
     )
-    for fold_result in fold_results:
-        for sid, item in fold_result.items():
-            merged[sid]["track1_left_prob"].append(np.asarray(item["track1_left_prob"], dtype=np.float32))
-            merged[sid]["track1_right_prob"].append(np.asarray(item["track1_right_prob"], dtype=np.float32))
-            merged[sid]["track2_left_prob"].append(np.asarray(item["track2_left_prob"], dtype=np.float32))
-            merged[sid]["track2_right_prob"].append(np.asarray(item["track2_right_prob"], dtype=np.float32))
+
+    checkpoints_payload = {"track1": [], "track2": []}
+
+    # If both tasks resolve to the exact same checkpoints, run one pass and collect both outputs.
+    if task == "both" and track1_ckpt_map and track1_ckpt_map == track2_ckpt_map:
+        fold_results, ckpts = _run_inference_for_checkpoints(
+            config,
+            graph,
+            loader,
+            track1_ckpt_map,
+            device,
+            collect_track1=True,
+            collect_track2=True,
+        )
+        checkpoints_payload["track1"] = ckpts
+        checkpoints_payload["track2"] = ckpts
+        for fold_result in fold_results:
+            for sid, item in fold_result.items():
+                merged[sid]["track1_left_prob"].append(np.asarray(item["track1_left_prob"], dtype=np.float32))
+                merged[sid]["track1_right_prob"].append(np.asarray(item["track1_right_prob"], dtype=np.float32))
+                merged[sid]["track2_left_prob"].append(np.asarray(item["track2_left_prob"], dtype=np.float32))
+                merged[sid]["track2_right_prob"].append(np.asarray(item["track2_right_prob"], dtype=np.float32))
+    else:
+        if task in {"track1", "both"}:
+            fold_results_t1, ckpts_t1 = _run_inference_for_checkpoints(
+                config,
+                graph,
+                loader,
+                track1_ckpt_map,
+                device,
+                collect_track1=True,
+                collect_track2=False,
+            )
+            checkpoints_payload["track1"] = ckpts_t1
+            for fold_result in fold_results_t1:
+                for sid, item in fold_result.items():
+                    merged[sid]["track1_left_prob"].append(np.asarray(item["track1_left_prob"], dtype=np.float32))
+                    merged[sid]["track1_right_prob"].append(np.asarray(item["track1_right_prob"], dtype=np.float32))
+
+        if task in {"track2", "both"}:
+            fold_results_t2, ckpts_t2 = _run_inference_for_checkpoints(
+                config,
+                graph,
+                loader,
+                track2_ckpt_map,
+                device,
+                collect_track1=False,
+                collect_track2=True,
+            )
+            checkpoints_payload["track2"] = ckpts_t2
+            for fold_result in fold_results_t2:
+                for sid, item in fold_result.items():
+                    merged[sid]["track2_left_prob"].append(np.asarray(item["track2_left_prob"], dtype=np.float32))
+                    merged[sid]["track2_right_prob"].append(np.asarray(item["track2_right_prob"], dtype=np.float32))
 
     track1_predictions: Dict[str, dict] = {}
     track2_predictions: Dict[str, dict] = {}
@@ -214,7 +336,7 @@ def predict_multitask(
         t2_left_prob = _mean_or_empty(merged[sid]["track2_left_prob"], empty_dim=5)
         t2_right_prob = _mean_or_empty(merged[sid]["track2_right_prob"], empty_dim=5)
 
-        if sid_str in track1_subject_ids:
+        if task in {"track1", "both"} and sid_str in track1_subject_ids:
             left_bin = (t1_left_prob >= track1_thr).astype(np.int64)
             right_bin = (t1_right_prob >= track1_thr).astype(np.int64)
             total = int(left_bin.sum() + right_bin.sum())
@@ -228,7 +350,7 @@ def predict_multitask(
                 "threshold": track1_thr,
             }
 
-        if sid_str in track2_subject_ids:
+        if task in {"track2", "both"} and sid_str in track2_subject_ids:
             left_idx = int(np.argmax(t2_left_prob))
             right_idx = int(np.argmax(t2_right_prob))
             track2_predictions[sid_str] = {
@@ -249,8 +371,13 @@ def predict_multitask(
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(
             {
-                "checkpoints": checkpoints,
+                "checkpoints": checkpoints_payload,
                 "task": task,
+                "checkpoint_policy": checkpoint_policy,
+                "pca": {
+                    "enabled": use_pca,
+                    "model_path": pca_model_path if use_pca else "",
+                },
                 "predictions": {
                     "track1": track1_predictions,
                     "track2": track2_predictions,
@@ -261,8 +388,10 @@ def predict_multitask(
         )
 
     logging.info(
-        "Predictions saved to %s | track1_subjects=%d | track2_subjects=%d",
+        "Predictions saved to %s | policy=%s | pca=%s | track1_subjects=%d | track2_subjects=%d",
         output_path,
+        checkpoint_policy,
+        use_pca,
         len(track1_predictions),
         len(track2_predictions),
     )
@@ -277,7 +406,13 @@ def predict_track2(config: dict, folds: str = "all", output_path: str = "") -> D
     Backward-compatible helper:
     returns only track2 predictions while writing the new multitask json format.
     """
-    predictions = predict_multitask(config, folds=folds, output_path=output_path, task="track2")
+    predictions = predict_multitask(
+        config,
+        folds=folds,
+        output_path=output_path,
+        task="track2",
+        checkpoint_policy="shared",
+    )
     return predictions["track2"]
 
 

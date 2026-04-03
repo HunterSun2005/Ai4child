@@ -66,7 +66,7 @@ def _to_device(batch: dict, device: torch.device) -> dict:
     return moved
 
 
-def _evaluate_subject_level(model, loader, device) -> Dict[str, float]:
+def _evaluate_track2_subject_level(model, loader, device) -> Dict[str, float]:
     model.eval()
     subject_probs_left = defaultdict(list)
     subject_probs_right = defaultdict(list)
@@ -116,12 +116,95 @@ def _evaluate_subject_level(model, loader, device) -> Dict[str, float]:
     }
 
 
+def _binary_f1(pred: np.ndarray, gt: np.ndarray) -> float:
+    tp = int(np.logical_and(pred == 1, gt == 1).sum())
+    fp = int(np.logical_and(pred == 1, gt == 0).sum())
+    fn = int(np.logical_and(pred == 0, gt == 1).sum())
+    if tp == 0 and fp == 0 and fn == 0:
+        return 1.0
+    denom = 2 * tp + fp + fn
+    if denom <= 0:
+        return 0.0
+    return float((2 * tp) / denom)
+
+
+def _evaluate_track1_subject_level(model, loader, device, threshold: float) -> Dict[str, float]:
+    model.eval()
+    subject_probs_left = defaultdict(list)
+    subject_probs_right = defaultdict(list)
+    subject_gt_left = {}
+    subject_gt_right = {}
+
+    with torch.no_grad():
+        for batch in loader:
+            batch = _to_device(batch, device)
+            outputs = model(batch["x"].float(), batch["direction"].float())
+            probs_left = torch.sigmoid(outputs["track1_left"])
+            probs_right = torch.sigmoid(outputs["track1_right"])
+
+            for i in range(probs_left.size(0)):
+                if batch["track1_mask"][i].item() <= 0:
+                    continue
+                sid = int(batch["subject_id"][i].item())
+                subject_probs_left[sid].append(probs_left[i].detach().cpu().numpy())
+                subject_probs_right[sid].append(probs_right[i].detach().cpu().numpy())
+                subject_gt_left[sid] = batch["track1_left"][i].detach().cpu().numpy().astype(np.int64)
+                subject_gt_right[sid] = batch["track1_right"][i].detach().cpu().numpy().astype(np.int64)
+
+    if not subject_probs_left:
+        return {
+            "num_subject": 0,
+            "left_f1": 0.0,
+            "right_f1": 0.0,
+            "mean_f1": 0.0,
+            "left_acc": 0.0,
+            "right_acc": 0.0,
+            "mean_acc": 0.0,
+        }
+
+    left_f1_list = []
+    right_f1_list = []
+    left_acc_list = []
+    right_acc_list = []
+    for sid in sorted(subject_probs_left.keys()):
+        pred_left = (np.mean(subject_probs_left[sid], axis=0) >= threshold).astype(np.int64)
+        pred_right = (np.mean(subject_probs_right[sid], axis=0) >= threshold).astype(np.int64)
+        gt_left = subject_gt_left[sid]
+        gt_right = subject_gt_right[sid]
+
+        left_f1_list.append(_binary_f1(pred_left, gt_left))
+        right_f1_list.append(_binary_f1(pred_right, gt_right))
+        left_acc_list.append(float((pred_left == gt_left).mean()))
+        right_acc_list.append(float((pred_right == gt_right).mean()))
+
+    left_f1 = float(np.mean(left_f1_list))
+    right_f1 = float(np.mean(right_f1_list))
+    left_acc = float(np.mean(left_acc_list))
+    right_acc = float(np.mean(right_acc_list))
+    return {
+        "num_subject": len(left_f1_list),
+        "left_f1": left_f1,
+        "right_f1": right_f1,
+        "mean_f1": 0.5 * (left_f1 + right_f1),
+        "left_acc": left_acc,
+        "right_acc": right_acc,
+        "mean_acc": 0.5 * (left_acc + right_acc),
+    }
+
+
 def train_cv(config: dict, cv_folds: int, max_epochs: int = -1) -> Dict[str, object]:
     _seed_all(int(config["train"]["seed"]))
 
     paths_cfg = config["paths"]
     train_cfg = config["train"]
     data_cfg = config["data"]
+    pca_cfg = data_cfg.get("pca", {})
+    comp_cfg = config.get("competition", {})
+    track1_threshold = float(comp_cfg.get("track1_threshold", 0.5))
+    use_pca = bool(pca_cfg.get("enabled", False))
+    pca_model_path = os.path.abspath(
+        paths_cfg.get("pca_model_path", "") or os.path.join(paths_cfg["work_dir"], "pca_joint_model.npz")
+    )
 
     manifest_path = os.path.abspath(paths_cfg["manifest_path"])
     work_dir = os.path.abspath(paths_cfg["work_dir"])
@@ -144,6 +227,7 @@ def train_cv(config: dict, cv_folds: int, max_epochs: int = -1) -> Dict[str, obj
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logging.info("Training device: %s", device)
+    logging.info("PCA setting | enabled=%s | model=%s", use_pca, pca_model_path if use_pca else "<disabled>")
 
     fold_summaries = []
     for fold_idx, val_subjects in enumerate(folds, start=1):
@@ -159,6 +243,8 @@ def train_cv(config: dict, cv_folds: int, max_epochs: int = -1) -> Dict[str, obj
             return_ssl=True,
             jitter_std=float(train_cfg["jitter_std"]),
             temporal_crop_min=float(train_cfg["temporal_crop_min"]),
+            use_pca=use_pca,
+            pca_model_path=pca_model_path,
         )
         val_opts = DatasetOptions(
             inputs=data_cfg["inputs"],
@@ -168,6 +254,8 @@ def train_cv(config: dict, cv_folds: int, max_epochs: int = -1) -> Dict[str, obj
             return_ssl=False,
             jitter_std=0.0,
             temporal_crop_min=1.0,
+            use_pca=use_pca,
+            pca_model_path=pca_model_path,
         )
 
         train_ds = AichildClipDataset(train_rows, graph, train_opts)
@@ -203,8 +291,10 @@ def train_cv(config: dict, cv_folds: int, max_epochs: int = -1) -> Dict[str, obj
         fold_dir = os.path.join(work_dir, f"fold_{fold_idx}")
         os.makedirs(fold_dir, exist_ok=True)
 
-        best_acc = -1.0
-        best_state = None
+        best_track2_acc = -1.0
+        best_track1_f1 = -1.0
+        best_state_track2 = None
+        best_state_track1 = None
         history = []
 
         logging.info(
@@ -273,7 +363,10 @@ def train_cv(config: dict, cv_folds: int, max_epochs: int = -1) -> Dict[str, obj
 
             scheduler.step()
 
-            val_metrics = _evaluate_subject_level(model, val_loader, device)
+            val_metrics_t2 = _evaluate_track2_subject_level(model, val_loader, device)
+            val_metrics_t1 = _evaluate_track1_subject_level(
+                model, val_loader, device, threshold=track1_threshold
+            )
             mean_loss = running["loss"] / max(running["steps"], 1)
             lr = float(optimizer.param_groups[0]["lr"])
 
@@ -283,48 +376,84 @@ def train_cv(config: dict, cv_folds: int, max_epochs: int = -1) -> Dict[str, obj
                 "train_ssl": running["ssl"] / max(running["steps"], 1),
                 "train_t1": running["t1"] / max(running["steps"], 1),
                 "train_t2": running["t2"] / max(running["steps"], 1),
-                "val_mean_acc": val_metrics["mean_acc"],
-                "val_left_acc": val_metrics["left_acc"],
-                "val_right_acc": val_metrics["right_acc"],
+                "val_t2_mean_acc": val_metrics_t2["mean_acc"],
+                "val_t2_left_acc": val_metrics_t2["left_acc"],
+                "val_t2_right_acc": val_metrics_t2["right_acc"],
+                "val_t1_mean_f1": val_metrics_t1["mean_f1"],
+                "val_t1_left_f1": val_metrics_t1["left_f1"],
+                "val_t1_right_f1": val_metrics_t1["right_f1"],
+                "val_t1_mean_acc": val_metrics_t1["mean_acc"],
                 "lr": lr,
             }
             history.append(record)
 
             logging.info(
-                "Fold %d Epoch %d | loss=%.4f | val_mean_acc=%.4f (L=%.4f, R=%.4f)",
+                "Fold %d Epoch %d | loss=%.4f | "
+                "val_t2_acc=%.4f (L=%.4f, R=%.4f) | "
+                "val_t1_f1=%.4f (L=%.4f, R=%.4f)",
                 fold_idx,
                 epoch,
                 record["train_loss"],
-                record["val_mean_acc"],
-                record["val_left_acc"],
-                record["val_right_acc"],
+                record["val_t2_mean_acc"],
+                record["val_t2_left_acc"],
+                record["val_t2_right_acc"],
+                record["val_t1_mean_f1"],
+                record["val_t1_left_f1"],
+                record["val_t1_right_f1"],
             )
 
-            if val_metrics["mean_acc"] > best_acc:
-                best_acc = val_metrics["mean_acc"]
-                best_state = {
+            if val_metrics_t2["mean_acc"] > best_track2_acc:
+                best_track2_acc = val_metrics_t2["mean_acc"]
+                best_state_track2 = {
                     "model": model.state_dict(),
                     "epoch": epoch,
-                    "val_metrics": val_metrics,
+                    "val_metrics_t2": val_metrics_t2,
+                    "val_metrics_t1": val_metrics_t1,
                     "config": config,
                 }
-                torch.save(best_state, os.path.join(fold_dir, "best.pt"))
+                torch.save(best_state_track2, os.path.join(fold_dir, "best_track2.pt"))
+                # Keep backward compatibility with previous inference defaults.
+                torch.save(best_state_track2, os.path.join(fold_dir, "best.pt"))
+
+            if val_metrics_t1["mean_f1"] > best_track1_f1:
+                best_track1_f1 = val_metrics_t1["mean_f1"]
+                best_state_track1 = {
+                    "model": model.state_dict(),
+                    "epoch": epoch,
+                    "val_metrics_t2": val_metrics_t2,
+                    "val_metrics_t1": val_metrics_t1,
+                    "config": config,
+                }
+                torch.save(best_state_track1, os.path.join(fold_dir, "best_track1.pt"))
 
         with open(os.path.join(fold_dir, "history.json"), "w", encoding="utf-8") as f:
             json.dump(history, f, indent=2)
 
         fold_summary = {
             "fold": fold_idx,
-            "best_acc": best_acc,
-            "best_epoch": int(best_state["epoch"]) if best_state else -1,
-            "checkpoint": os.path.join(fold_dir, "best.pt"),
+            "best_track2_acc": best_track2_acc,
+            "best_track2_epoch": int(best_state_track2["epoch"]) if best_state_track2 else -1,
+            "best_track1_f1": best_track1_f1,
+            "best_track1_epoch": int(best_state_track1["epoch"]) if best_state_track1 else -1,
+            "checkpoint_track2": os.path.join(fold_dir, "best_track2.pt"),
+            "checkpoint_track1": os.path.join(fold_dir, "best_track1.pt"),
+            "checkpoint_compat": os.path.join(fold_dir, "best.pt"),
         }
         fold_summaries.append(fold_summary)
 
     cv_result = {
         "num_folds": cv_folds,
         "folds": fold_summaries,
-        "mean_best_acc": float(np.mean([f["best_acc"] for f in fold_summaries])) if fold_summaries else 0.0,
+        "mean_best_track2_acc": (
+            float(np.mean([f["best_track2_acc"] for f in fold_summaries])) if fold_summaries else 0.0
+        ),
+        "mean_best_track1_f1": (
+            float(np.mean([f["best_track1_f1"] for f in fold_summaries])) if fold_summaries else 0.0
+        ),
+        # Backward-compatible key.
+        "mean_best_acc": (
+            float(np.mean([f["best_track2_acc"] for f in fold_summaries])) if fold_summaries else 0.0
+        ),
     }
 
     with open(os.path.join(work_dir, "cv_summary.json"), "w", encoding="utf-8") as f:

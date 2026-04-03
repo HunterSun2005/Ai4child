@@ -22,6 +22,23 @@ def _load_config(path: str) -> Dict[str, Any]:
     return cfg
 
 
+def _apply_runtime_overrides(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
+    data_cfg = config.setdefault("data", {})
+    pca_cfg = data_cfg.setdefault("pca", {})
+
+    use_pca = getattr(args, "use_pca", "auto")
+    if use_pca == "on":
+        pca_cfg["enabled"] = True
+    elif use_pca == "off":
+        pca_cfg["enabled"] = False
+
+    pca_components = int(getattr(args, "pca_components", -1))
+    if pca_components > 0:
+        pca_cfg["n_components"] = pca_components
+
+    return config
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Track12 multitask pipeline for EfficientGCNv1")
     parser.add_argument(
@@ -37,10 +54,36 @@ def main() -> None:
     sp_pre = subparsers.add_parser("preprocess", help="Build cache and manifest")
     sp_pre.add_argument("--max_clips", type=int, default=-1, help="Only preprocess first N clips for smoke test")
     sp_pre.add_argument("--overwrite", action="store_true", help="Overwrite existing cache")
+    sp_pre.add_argument(
+        "--use_pca",
+        type=str,
+        default="auto",
+        choices=["auto", "on", "off"],
+        help="Override PCA usage from config.",
+    )
+    sp_pre.add_argument(
+        "--pca_components",
+        type=int,
+        default=-1,
+        help="Override PCA components from config (effective when PCA enabled).",
+    )
 
     sp_train = subparsers.add_parser("train", help="Run CV training")
     sp_train.add_argument("--cv", type=int, default=5, help="Number of CV folds")
     sp_train.add_argument("--epochs", type=int, default=-1, help="Override epochs in config")
+    sp_train.add_argument(
+        "--use_pca",
+        type=str,
+        default="auto",
+        choices=["auto", "on", "off"],
+        help="Override PCA usage from config.",
+    )
+    sp_train.add_argument(
+        "--pca_components",
+        type=int,
+        default=-1,
+        help="Override PCA components from config (effective when PCA enabled).",
+    )
 
     sp_pred = subparsers.add_parser("predict", help="Predict track1/track2 test subjects")
     sp_pred.add_argument("--folds", type=str, default="all", help="all or comma-separated fold ids, e.g. 1,2,3")
@@ -50,6 +93,30 @@ def main() -> None:
         default="both",
         choices=["track1", "track2", "both"],
         help="Prediction target task",
+    )
+    sp_pred.add_argument(
+        "--checkpoint_policy",
+        type=str,
+        default="separate",
+        choices=["shared", "separate"],
+        help=(
+            "Checkpoint selection policy. "
+            "'separate': track1 uses best_track1.pt and track2 uses best_track2.pt; "
+            "'shared': both tasks use track2-selected checkpoints."
+        ),
+    )
+    sp_pred.add_argument(
+        "--use_pca",
+        type=str,
+        default="auto",
+        choices=["auto", "on", "off"],
+        help="Override PCA usage from config.",
+    )
+    sp_pred.add_argument(
+        "--pca_components",
+        type=int,
+        default=-1,
+        help="Override PCA components from config (effective when PCA enabled).",
     )
     sp_pred.add_argument("--output", type=str, default="", help="Prediction output json path")
 
@@ -63,6 +130,7 @@ def main() -> None:
 
     config_path = os.path.abspath(args.config)
     config = _load_config(config_path)
+    config = _apply_runtime_overrides(config, args)
 
     if args.command == "preprocess":
         from src.aichild.data import preprocess_dataset
@@ -95,6 +163,7 @@ def main() -> None:
                 folds=args.folds,
                 output_path=args.output,
                 task=args.task,
+                checkpoint_policy=args.checkpoint_policy,
             )
         except ImportError as exc:
             raise ModuleNotFoundError(

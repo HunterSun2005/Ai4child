@@ -7,6 +7,7 @@ paths:
   work_dir: ./workdir/aichild_track12
   cache_dir: ./workdir/aichild_track12/cache
   manifest_path: ./workdir/aichild_track12/manifest.csv
+  pca_model_path: ./workdir/aichild_track12/pca_joint_model.npz
   prediction_path: ./workdir/aichild_track12/predictions_multitask.json
   submission_output: ./submissions/submission_track12.csv
 
@@ -81,6 +82,11 @@ data:
     - 130
     - 131
     - 132
+  pca:
+    enabled: false
+    n_components: 32
+    fit_on: non_test      # choices: non_test / labeled / all
+    frames_per_clip: 32   # sampled frames per clip when fitting PCA
 
 model:
   model_type: EfficientGCN-B0

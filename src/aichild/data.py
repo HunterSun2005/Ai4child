@@ -168,6 +168,142 @@ def _clip_to_joint_tensor(xy: np.ndarray) -> np.ndarray:
     return joint
 
 
+def _resolve_pca_model_path(config: dict) -> str:
+    paths_cfg = config["paths"]
+    p = paths_cfg.get("pca_model_path", "")
+    if p:
+        return os.path.abspath(p)
+    work_dir = os.path.abspath(paths_cfg["work_dir"])
+    return os.path.join(work_dir, "pca_joint_model.npz")
+
+
+def _fit_axis_pca(samples: np.ndarray, n_components: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    samples: (N, V)
+    returns:
+      mean: (V,)
+      components: (K, V)
+      explained_ratio: (K,)
+    """
+    if samples.ndim != 2:
+        raise ValueError(f"PCA samples must be 2D, got shape={samples.shape}")
+
+    n, v = samples.shape
+    if n < 2:
+        raise ValueError("PCA requires at least 2 samples.")
+
+    k = min(int(n_components), v)
+    mean = samples.mean(axis=0).astype(np.float32)
+    centered = (samples - mean).astype(np.float64)
+
+    cov = centered.T @ centered
+    cov /= max(n - 1, 1)
+
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    order = np.argsort(eigvals)[::-1]
+    eigvals = eigvals[order]
+    eigvecs = eigvecs[:, order]
+
+    components = eigvecs[:, :k].T.astype(np.float32)  # (K, V)
+    total = float(np.maximum(eigvals.sum(), 1e-12))
+    explained = (eigvals[:k] / total).astype(np.float32)
+    return mean, components, explained
+
+
+def _fit_and_save_joint_pca(config: dict, rows: List[dict], overwrite: bool = False) -> Optional[str]:
+    data_cfg = config["data"]
+    pca_cfg = data_cfg.get("pca", {})
+    if not bool(pca_cfg.get("enabled", False)):
+        return None
+
+    n_components = int(pca_cfg.get("n_components", 0))
+    if n_components <= 0:
+        raise ValueError("data.pca.n_components must be > 0 when PCA is enabled.")
+
+    pca_path = _resolve_pca_model_path(config)
+    os.makedirs(os.path.dirname(pca_path), exist_ok=True)
+    if os.path.exists(pca_path) and not overwrite:
+        logging.info("PCA model exists, reuse: %s", pca_path)
+        return pca_path
+
+    fit_on = str(pca_cfg.get("fit_on", "non_test")).strip().lower()
+    to_bool = lambda x: str(x).strip() in {"1", "true", "True"}
+    if fit_on == "all":
+        fit_rows = rows
+    elif fit_on == "labeled":
+        fit_rows = [r for r in rows if to_bool(r["has_track1_label"]) or to_bool(r["has_track2_label"])]
+    else:
+        # default: non_test
+        fit_rows = [r for r in rows if (not to_bool(r["is_track1_test"])) and (not to_bool(r["is_track2_test"]))]
+
+    if not fit_rows:
+        logging.warning("No rows matched fit_on=%s for PCA; fallback to all rows.", fit_on)
+        fit_rows = rows
+    if not fit_rows:
+        raise ValueError(f"No rows available for PCA fit (fit_on={fit_on}).")
+
+    frames_per_clip = int(pca_cfg.get("frames_per_clip", 32))
+    frames_per_clip = max(frames_per_clip, 1)
+
+    x_list = []
+    y_list = []
+    for row in fit_rows:
+        cache_path = row["cache_path"]
+        if not os.path.exists(cache_path):
+            continue
+        joint = np.load(cache_path)["joint"].astype(np.float32)  # (2, T, V, 1)
+        t = joint.shape[1]
+        if t <= frames_per_clip:
+            idx = np.arange(t, dtype=np.int64)
+        else:
+            idx = np.linspace(0, t - 1, frames_per_clip).round().astype(np.int64)
+
+        x_list.append(joint[0, idx, :, 0])
+        y_list.append(joint[1, idx, :, 0])
+
+    if not x_list or not y_list:
+        raise ValueError("No clip cache available to fit PCA model.")
+
+    x_samples = np.concatenate(x_list, axis=0)  # (N, V)
+    y_samples = np.concatenate(y_list, axis=0)  # (N, V)
+    v = int(x_samples.shape[1])
+    if n_components > v:
+        raise ValueError(
+            f"data.pca.n_components={n_components} cannot exceed keypoint dim V={v}."
+        )
+
+    mean_x, comp_x, explained_x = _fit_axis_pca(x_samples, n_components=n_components)
+    mean_y, comp_y, explained_y = _fit_axis_pca(y_samples, n_components=n_components)
+
+    np.savez_compressed(
+        pca_path,
+        mean_x=mean_x,
+        components_x=comp_x,
+        explained_ratio_x=explained_x,
+        mean_y=mean_y,
+        components_y=comp_y,
+        explained_ratio_y=explained_y,
+        keypoint_dim=np.array([v], dtype=np.int64),
+        n_components=np.array([int(comp_x.shape[0])], dtype=np.int64),
+        fit_on=np.array([fit_on]),
+    )
+    logging.info(
+        "Saved PCA model: %s | dim=%d -> %d | fit_on=%s | clips=%d | samples=%d",
+        pca_path,
+        v,
+        int(comp_x.shape[0]),
+        fit_on,
+        len(fit_rows),
+        int(x_samples.shape[0]),
+    )
+    logging.info(
+        "PCA explained variance | x=%.4f | y=%.4f",
+        float(explained_x.sum()),
+        float(explained_y.sum()),
+    )
+    return pca_path
+
+
 def preprocess_dataset(config: dict, max_clips: int = -1, overwrite: bool = False) -> dict:
     paths_cfg = config["paths"]
     data_cfg = config["data"]
@@ -308,11 +444,14 @@ def preprocess_dataset(config: dict, max_clips: int = -1, overwrite: bool = Fals
         writer.writeheader()
         writer.writerows(rows)
 
+    pca_path = _fit_and_save_joint_pca(config, rows, overwrite=overwrite)
+
     info = {
         "manifest_path": manifest_path,
         "total_clips_scanned": total,
         "total_rows": len(rows),
         "dropped_clips": dropped,
+        "pca_model_path": pca_path or "",
     }
     logging.info("Preprocess done: %s", info)
     return info
@@ -376,6 +515,8 @@ class DatasetOptions:
     return_ssl: bool
     jitter_std: float
     temporal_crop_min: float
+    use_pca: bool = False
+    pca_model_path: str = ""
 
 
 class AichildClipDataset(Dataset):
@@ -383,6 +524,56 @@ class AichildClipDataset(Dataset):
         self.rows = rows
         self.graph = graph
         self.options = options
+        self.pca_model = None
+        if self.options.use_pca:
+            self.pca_model = self._load_pca_model(self.options.pca_model_path)
+
+    def _load_pca_model(self, path: str) -> dict:
+        p = os.path.abspath(path) if path else ""
+        if not p or not os.path.exists(p):
+            raise FileNotFoundError(
+                "PCA is enabled but model file not found. "
+                f"Expected: {p if p else '<empty path>'}. "
+                "Please run preprocess first or disable data.pca.enabled."
+            )
+        data = np.load(p)
+        model = {
+            "mean_x": data["mean_x"].astype(np.float32),
+            "components_x": data["components_x"].astype(np.float32),
+            "mean_y": data["mean_y"].astype(np.float32),
+            "components_y": data["components_y"].astype(np.float32),
+            "keypoint_dim": int(data["keypoint_dim"][0]),
+            "n_components": int(data["n_components"][0]),
+        }
+        return model
+
+    def _apply_joint_pca(self, joint: np.ndarray) -> np.ndarray:
+        """
+        PCA reduce+reconstruct on each frame axis-wise (x/y), keeping original joint size.
+        joint: (2, T, V, 1)
+        """
+        if self.pca_model is None:
+            return joint
+
+        out = joint.copy()
+        _, t, v, _ = out.shape
+        expected_v = int(self.pca_model["keypoint_dim"])
+        if v != expected_v:
+            raise ValueError(
+                f"PCA keypoint dim mismatch: joint V={v}, PCA expects V={expected_v}."
+            )
+
+        for axis, mean_key, comp_key in [
+            (0, "mean_x", "components_x"),
+            (1, "mean_y", "components_y"),
+        ]:
+            x = out[axis, :, :, 0]  # (T, V)
+            mean = self.pca_model[mean_key][None, :]  # (1, V)
+            comp = self.pca_model[comp_key]  # (K, V)
+            z = (x - mean) @ comp.T         # (T, K)
+            x_rec = z @ comp + mean         # (T, V)
+            out[axis, :, :, 0] = x_rec.astype(np.float32)
+        return out
 
     def __len__(self):
         return len(self.rows)
@@ -456,6 +647,8 @@ class AichildClipDataset(Dataset):
         row = self.rows[index]
         data = np.load(row["cache_path"])
         joint = data["joint"].astype(np.float32)  # (2, T, V, 1)
+        if self.options.use_pca:
+            joint = self._apply_joint_pca(joint)
         expected_v = len(self.graph.connect_joint)
         if joint.shape[2] != expected_v:
             raise ValueError(
