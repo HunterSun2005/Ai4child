@@ -23,8 +23,19 @@ def _load_config(path: str) -> Dict[str, Any]:
 
 
 def _apply_runtime_overrides(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
+    paths_cfg = config.setdefault("paths", {})
     data_cfg = config.setdefault("data", {})
     pca_cfg = data_cfg.setdefault("pca", {})
+
+    # Optional experiment directory override.
+    # When provided, all intermediate artifacts are redirected to this folder.
+    work_dir_override = str(getattr(args, "work_dir", "") or "").strip()
+    if work_dir_override:
+        paths_cfg["work_dir"] = work_dir_override
+        paths_cfg["cache_dir"] = os.path.join(work_dir_override, "cache")
+        paths_cfg["manifest_path"] = os.path.join(work_dir_override, "manifest.csv")
+        paths_cfg["pca_model_path"] = os.path.join(work_dir_override, "pca_joint_model.npz")
+        paths_cfg["prediction_path"] = os.path.join(work_dir_override, "predictions_multitask.json")
 
     use_pca = getattr(args, "use_pca", "auto")
     if use_pca == "on":
@@ -47,6 +58,15 @@ def main() -> None:
         type=str,
         default="configs/track12_multitask_b0.yaml",
         help="Path to yaml config",
+    )
+    parser.add_argument(
+        "--work_dir",
+        type=str,
+        default="",
+        help=(
+            "Optional experiment directory override. "
+            "Redirects work_dir/cache/manifest/pca/prediction paths to this folder."
+        ),
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)

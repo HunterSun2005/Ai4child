@@ -30,6 +30,20 @@ Use:
 python track12_main.py -c configs/track12_multitask_b0.yaml <command>
 ```
 
+Optional experiment directory override:
+
+```bash
+python track12_main.py --work_dir ./workdir/aichild_track12_pca_32 <command>
+```
+
+With `--work_dir`, the pipeline automatically redirects:
+
+- `paths.work_dir`
+- `paths.cache_dir`
+- `paths.manifest_path`
+- `paths.pca_model_path`
+- `paths.prediction_path`
+
 Supported commands:
 
 - `preprocess`: build clip cache + manifest
@@ -54,7 +68,7 @@ python track12_main.py preprocess --max_clips 20
 PCA ablation example:
 
 ```bash
-python track12_main.py preprocess --use_pca on --pca_components 32
+python track12_main.py --work_dir ./workdir/aichild_track12_pca_32 preprocess --use_pca on --pca_components 32
 ```
 
 When PCA is enabled, preprocessing also fits and saves a PCA model.
@@ -68,7 +82,7 @@ python track12_main.py train --cv 5
 PCA ablation example:
 
 ```bash
-python track12_main.py train --cv 5 --use_pca on --pca_components 32
+python track12_main.py --work_dir ./workdir/aichild_track12_pca_32 train --cv 5 --use_pca on --pca_components 32
 ```
 
 Each fold now saves **two task-specific best checkpoints**:
@@ -88,7 +102,7 @@ python track12_main.py predict --folds all --task both
 If training used PCA, prediction should use the same PCA setting:
 
 ```bash
-python track12_main.py predict --folds all --task both --use_pca on --pca_components 32
+python track12_main.py --work_dir ./workdir/aichild_track12_pca_32 predict --folds all --task both --use_pca on --pca_components 32
 ```
 
 Default checkpoint policy is `separate`:
