@@ -35,10 +35,25 @@ class EfficientGCN(nn.Module):
         # init parameters
         init_param(self.modules())
 
-    def forward(self, x):
+    def _set_confidence_map(self, confidence):
+        for m in self.modules():
+            if hasattr(m, "set_confidence_map"):
+                m.set_confidence_map(confidence)
+
+    def forward(self, x, confidence=None):
 
         N, I, C, T, V, M = x.size()
         x = x.permute(1, 0, 5, 2, 3, 4).contiguous().view(I, N*M, C, T, V)
+
+        conf_map = None
+        if confidence is not None:
+            # confidence: (N, 1, T, V, M) -> (N*M, 1, T, V)
+            conf_map = (
+                confidence.permute(0, 4, 1, 2, 3)
+                .contiguous()
+                .view(N * M, confidence.size(1), confidence.size(2), confidence.size(3))
+            )
+        self._set_confidence_map(conf_map)
 
         # input branches
         x = torch.cat([branch(x[i]) for i, branch in enumerate(self.input_branches)], dim=1)

@@ -66,7 +66,7 @@ def _to_device(batch: dict, device: torch.device) -> dict:
     return moved
 
 
-def _evaluate_track2_subject_level(model, loader, device) -> Dict[str, float]:
+def _evaluate_track2_subject_level(model, loader, device, use_score: bool) -> Dict[str, float]:
     model.eval()
     subject_probs_left = defaultdict(list)
     subject_probs_right = defaultdict(list)
@@ -76,7 +76,12 @@ def _evaluate_track2_subject_level(model, loader, device) -> Dict[str, float]:
     with torch.no_grad():
         for batch in loader:
             batch = _to_device(batch, device)
-            outputs = model(batch["x"].float(), batch["direction"].float())
+            confidence = batch["confidence"].float() if use_score else None
+            outputs = model(
+                batch["x"].float(),
+                batch["direction"].float(),
+                confidence,
+            )
             probs_left = torch.softmax(outputs["track2_left"], dim=1)
             probs_right = torch.softmax(outputs["track2_right"], dim=1)
 
@@ -128,7 +133,13 @@ def _binary_f1(pred: np.ndarray, gt: np.ndarray) -> float:
     return float((2 * tp) / denom)
 
 
-def _evaluate_track1_subject_level(model, loader, device, threshold: float) -> Dict[str, float]:
+def _evaluate_track1_subject_level(
+    model,
+    loader,
+    device,
+    threshold: float,
+    use_score: bool,
+) -> Dict[str, float]:
     model.eval()
     subject_probs_left = defaultdict(list)
     subject_probs_right = defaultdict(list)
@@ -138,7 +149,12 @@ def _evaluate_track1_subject_level(model, loader, device, threshold: float) -> D
     with torch.no_grad():
         for batch in loader:
             batch = _to_device(batch, device)
-            outputs = model(batch["x"].float(), batch["direction"].float())
+            confidence = batch["confidence"].float() if use_score else None
+            outputs = model(
+                batch["x"].float(),
+                batch["direction"].float(),
+                confidence,
+            )
             probs_left = torch.sigmoid(outputs["track1_left"])
             probs_right = torch.sigmoid(outputs["track1_right"])
 
@@ -199,9 +215,11 @@ def train_cv(config: dict, cv_folds: int, max_epochs: int = -1) -> Dict[str, obj
     train_cfg = config["train"]
     data_cfg = config["data"]
     pca_cfg = data_cfg.get("pca", {})
+    score_cfg = data_cfg.get("score", {})
     comp_cfg = config.get("competition", {})
     track1_threshold = float(comp_cfg.get("track1_threshold", 0.5))
     use_pca = bool(pca_cfg.get("enabled", False))
+    use_score = bool(score_cfg.get("enabled", False))
     pca_model_path = os.path.abspath(
         paths_cfg.get("pca_model_path", "") or os.path.join(paths_cfg["work_dir"], "pca_joint_model.npz")
     )
@@ -228,6 +246,15 @@ def train_cv(config: dict, cv_folds: int, max_epochs: int = -1) -> Dict[str, obj
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logging.info("Training device: %s", device)
     logging.info("PCA setting | enabled=%s | model=%s", use_pca, pca_model_path if use_pca else "<disabled>")
+    logging.info(
+        "Score setting | enabled=%s | thr=%.4f | clip=[%.3f, %.3f] | power=%.3f | only_above_thr=%s",
+        use_score,
+        float(data_cfg["score_thr"]),
+        float(score_cfg.get("clip_min", 0.0)),
+        float(score_cfg.get("clip_max", 1.0)),
+        float(score_cfg.get("power", 1.0)),
+        bool(score_cfg.get("only_above_thr", True)),
+    )
 
     fold_summaries = []
     for fold_idx, val_subjects in enumerate(folds, start=1):
@@ -239,23 +266,35 @@ def train_cv(config: dict, cv_folds: int, max_epochs: int = -1) -> Dict[str, obj
             inputs=data_cfg["inputs"],
             root_joint=int(data_cfg["root_joint"]),
             num_frame=int(data_cfg["num_frame"]),
+            score_thr=float(data_cfg["score_thr"]),
             train=True,
             return_ssl=True,
             jitter_std=float(train_cfg["jitter_std"]),
             temporal_crop_min=float(train_cfg["temporal_crop_min"]),
             use_pca=use_pca,
             pca_model_path=pca_model_path,
+            use_score=use_score,
+            score_clip_min=float(score_cfg.get("clip_min", 0.0)),
+            score_clip_max=float(score_cfg.get("clip_max", 1.0)),
+            score_power=float(score_cfg.get("power", 1.0)),
+            score_only_above_thr=bool(score_cfg.get("only_above_thr", True)),
         )
         val_opts = DatasetOptions(
             inputs=data_cfg["inputs"],
             root_joint=int(data_cfg["root_joint"]),
             num_frame=int(data_cfg["num_frame"]),
+            score_thr=float(data_cfg["score_thr"]),
             train=False,
             return_ssl=False,
             jitter_std=0.0,
             temporal_crop_min=1.0,
             use_pca=use_pca,
             pca_model_path=pca_model_path,
+            use_score=use_score,
+            score_clip_min=float(score_cfg.get("clip_min", 0.0)),
+            score_clip_max=float(score_cfg.get("clip_max", 1.0)),
+            score_power=float(score_cfg.get("power", 1.0)),
+            score_only_above_thr=bool(score_cfg.get("only_above_thr", True)),
         )
 
         train_ds = AichildClipDataset(train_rows, graph, train_opts)
@@ -322,9 +361,11 @@ def train_cv(config: dict, cv_folds: int, max_epochs: int = -1) -> Dict[str, obj
 
                 x = batch["x"].float()
                 x_ssl = batch["x_ssl"].float()
+                conf = batch["confidence"].float() if use_score else None
+                conf_ssl = batch["confidence_ssl"].float() if use_score else None
                 direction = batch["direction"].float()
 
-                outputs = model(x, direction)
+                outputs = model(x, direction, conf)
 
                 t1_mask = batch["track1_mask"].float()
                 t2_mask = batch["track2_mask"].float()
@@ -335,8 +376,8 @@ def train_cv(config: dict, cv_folds: int, max_epochs: int = -1) -> Dict[str, obj
                 loss_t2 = _masked_ce(outputs["track2_left"], batch["track2_left"].long(), t2_mask)
                 loss_t2 += _masked_ce(outputs["track2_right"], batch["track2_right"].long(), t2_mask)
 
-                z1 = model.ssl_embedding(x, direction)
-                z2 = model.ssl_embedding(x_ssl, direction)
+                z1 = model.ssl_embedding(x, direction, conf)
+                z2 = model.ssl_embedding(x_ssl, direction, conf_ssl)
                 loss_ssl = _info_nce(z1, z2, float(train_cfg["ssl_temperature"]))
 
                 loss = (
@@ -363,9 +404,18 @@ def train_cv(config: dict, cv_folds: int, max_epochs: int = -1) -> Dict[str, obj
 
             scheduler.step()
 
-            val_metrics_t2 = _evaluate_track2_subject_level(model, val_loader, device)
+            val_metrics_t2 = _evaluate_track2_subject_level(
+                model,
+                val_loader,
+                device,
+                use_score=use_score,
+            )
             val_metrics_t1 = _evaluate_track1_subject_level(
-                model, val_loader, device, threshold=track1_threshold
+                model,
+                val_loader,
+                device,
+                threshold=track1_threshold,
+                use_score=use_score,
             )
             mean_loss = running["loss"] / max(running["steps"], 1)
             lr = float(optimizer.param_groups[0]["lr"])

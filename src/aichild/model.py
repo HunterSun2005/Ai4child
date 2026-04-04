@@ -49,13 +49,23 @@ class MultiTaskEfficientGCN(nn.Module):
             nn.Linear(fused_dim, ssl_dim),
         )
 
-    def _fused_feature(self, x: torch.Tensor, direction: torch.Tensor) -> torch.Tensor:
-        _, feature = self.backbone(x)
+    def _fused_feature(
+        self,
+        x: torch.Tensor,
+        direction: torch.Tensor,
+        confidence: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        _, feature = self.backbone(x, confidence=confidence)
         pooled = feature.mean(dim=(2, 3, 4))
         return torch.cat([pooled, direction], dim=1)
 
-    def forward(self, x: torch.Tensor, direction: torch.Tensor) -> Dict[str, torch.Tensor]:
-        fused = self._fused_feature(x, direction)
+    def forward(
+        self,
+        x: torch.Tensor,
+        direction: torch.Tensor,
+        confidence: torch.Tensor | None = None,
+    ) -> Dict[str, torch.Tensor]:
+        fused = self._fused_feature(x, direction, confidence=confidence)
         outputs = {
             "track1_left": self.track1_left_head(fused),
             "track1_right": self.track1_right_head(fused),
@@ -64,7 +74,12 @@ class MultiTaskEfficientGCN(nn.Module):
         }
         return outputs
 
-    def ssl_embedding(self, x: torch.Tensor, direction: torch.Tensor) -> torch.Tensor:
-        fused = self._fused_feature(x, direction)
+    def ssl_embedding(
+        self,
+        x: torch.Tensor,
+        direction: torch.Tensor,
+        confidence: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        fused = self._fused_feature(x, direction, confidence=confidence)
         z = self.ssl_projector(fused)
         return F.normalize(z, dim=1)

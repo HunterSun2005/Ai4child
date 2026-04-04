@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+import torch.nn.functional as F
 
 
 class Basic_Layer(nn.Module):
@@ -190,10 +191,39 @@ class SpatialGraphConv(nn.Module):
             self.edge = nn.Parameter(torch.ones_like(self.A))
         else:
             self.edge = 1
+        self.confidence_map = None
+
+    def set_confidence_map(self, confidence_map):
+        """
+        confidence_map: (N, 1, T, V) or None
+        """
+        self.confidence_map = confidence_map
 
     def forward(self, x):
         x = self.gcn(x)
         n, kc, t, v = x.size()
         x = x.view(n, self.s_kernel_size, kc//self.s_kernel_size, t, v)
-        x = torch.einsum('nkctv,kvw->nctw', (x, self.A * self.edge)).contiguous()
+        a = self.A * self.edge
+
+        conf = self.confidence_map
+        if conf is not None:
+            if conf.size(0) != n:
+                raise ValueError(
+                    f"Confidence batch mismatch: conf N={conf.size(0)} vs feature N={n}"
+                )
+            if conf.size(2) != t or conf.size(3) != v:
+                conf = F.interpolate(conf, size=(t, v), mode="nearest")
+            conf = torch.clamp(conf, min=0.0, max=1.0)
+            m = conf[:, 0]  # (N, T, V)
+
+            # Confidence-aware source weighting: suppress low-confidence nodes in graph aggregation.
+            x = x * m[:, None, None, :, :]
+            x = torch.einsum('nkctv,kvw->nctw', (x, a)).contiguous()
+
+            # Renormalize to keep scale stable under varying confidence masks.
+            den = torch.einsum('ntv,kvw->ntw', (m, a)).contiguous().clamp(min=1e-6)
+            x = x / den[:, None, :, :]
+            return x
+
+        x = torch.einsum('nkctv,kvw->nctw', (x, a)).contiguous()
         return x

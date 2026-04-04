@@ -13,9 +13,15 @@ paths:
 
 data:
   num_frame: 256
-  inputs: JV
+  inputs: JVB
   root_joint: 11
   score_thr: 0.1
+  score:
+    enabled: false
+    clip_min: 0.0
+    clip_max: 1.0
+    power: 1.0
+    only_above_thr: true
   keypoint_indices:
     - 0
     - 1
@@ -83,10 +89,10 @@ data:
     - 131
     - 132
   pca:
-    enabled: false
-    n_components: 32
+    enabled: true
+    n_components: 48
     fit_on: non_test      # choices: non_test / labeled / all
-    frames_per_clip: 32   # sampled frames per clip when fitting PCA
+    frames_per_clip: 48   # sampled frames per clip when fitting PCA
 
 model:
   model_type: EfficientGCN-B0
@@ -107,6 +113,7 @@ model:
 
 train:
   seed: 42
+  cv_folds: 3
   batch_size: 16
   num_workers: 4
   epochs: 30
@@ -122,6 +129,12 @@ train:
 
   jitter_std: 0.01
   temporal_crop_min: 0.75
+
+predict:
+  folds: all
+  task: both
+  checkpoint_policy: separate
+  ensemble_topk: 0
 
 competition:
   track1_test_ids: [4, 5, 18, 26, 28, 40, 42, 43, 47, 48, 53, 54, 72, 78, 83, 85]

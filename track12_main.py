@@ -94,7 +94,7 @@ def main() -> None:
     )
 
     sp_train = subparsers.add_parser("train", help="Run CV training")
-    sp_train.add_argument("--cv", type=int, default=3, help="Number of CV folds")
+    sp_train.add_argument("--cv", type=int, default=-1, help="Override CV folds; <=0 means use config")
     sp_train.add_argument("--epochs", type=int, default=-1, help="Override epochs in config")
     sp_train.add_argument(
         "--use_pca",
@@ -111,18 +111,18 @@ def main() -> None:
     )
 
     sp_pred = subparsers.add_parser("predict", help="Predict track1/track2 test subjects")
-    sp_pred.add_argument("--folds", type=str, default="all", help="all or comma-separated fold ids, e.g. 1,2,3")
+    sp_pred.add_argument("--folds", type=str, default="", help="all or comma-separated fold ids, e.g. 1,2,3")
     sp_pred.add_argument(
         "--task",
         type=str,
-        default="both",
+        default=None,
         choices=["track1", "track2", "both"],
         help="Prediction target task",
     )
     sp_pred.add_argument(
         "--checkpoint_policy",
         type=str,
-        default="separate",
+        default=None,
         choices=["shared", "separate"],
         help=(
             "Checkpoint selection policy. "
@@ -146,10 +146,10 @@ def main() -> None:
     sp_pred.add_argument(
         "--ensemble_topk",
         type=int,
-        default=0,
+        default=-1,
         help=(
             "Use top-k folds ranked by cv_summary metrics. "
-            "0 means use all selected folds."
+            "<0 means use config, 0 means use all selected folds."
         ),
     )
     sp_pred.add_argument("--output", type=str, default="", help="Prediction output json path")
@@ -180,7 +180,10 @@ def main() -> None:
                 "Training requires PyTorch. Please install torch first."
             ) from exc
 
-        result = train_cv(config, cv_folds=args.cv, max_epochs=args.epochs)
+        cv_folds = int(args.cv)
+        if cv_folds <= 0:
+            cv_folds = int(config.get("train", {}).get("cv_folds", 3))
+        result = train_cv(config, cv_folds=cv_folds, max_epochs=args.epochs)
         logging.info("Train summary: %s", result)
 
     elif args.command == "predict":
@@ -192,13 +195,34 @@ def main() -> None:
             ) from exc
 
         try:
+            pred_cfg = config.get("predict", {})
+            folds = args.folds.strip() if isinstance(args.folds, str) else ""
+            if not folds:
+                folds = str(pred_cfg.get("folds", "all"))
+
+            task = args.task.strip() if isinstance(args.task, str) else ""
+            if not task:
+                task = str(pred_cfg.get("task", "both"))
+
+            checkpoint_policy = (
+                args.checkpoint_policy.strip()
+                if isinstance(args.checkpoint_policy, str)
+                else ""
+            )
+            if not checkpoint_policy:
+                checkpoint_policy = str(pred_cfg.get("checkpoint_policy", "separate"))
+
+            ensemble_topk = int(args.ensemble_topk)
+            if ensemble_topk < 0:
+                ensemble_topk = int(pred_cfg.get("ensemble_topk", 0))
+
             predictions = predict_multitask(
                 config,
-                folds=args.folds,
+                folds=folds,
                 output_path=args.output,
-                task=args.task,
-                checkpoint_policy=args.checkpoint_policy,
-                ensemble_topk=args.ensemble_topk,
+                task=task,
+                checkpoint_policy=checkpoint_policy,
+                ensemble_topk=ensemble_topk,
             )
         except ImportError as exc:
             raise ModuleNotFoundError(

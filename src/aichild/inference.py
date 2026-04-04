@@ -174,6 +174,7 @@ def _run_inference_for_checkpoints(
     device,
     collect_track1: bool,
     collect_track2: bool,
+    use_score: bool,
 ) -> Tuple[List[Dict[int, dict]], List[str]]:
     from .model import MultiTaskEfficientGCN
 
@@ -196,7 +197,12 @@ def _run_inference_for_checkpoints(
             desc = f"Predict fold_{fid}"
             for batch in tqdm(loader, desc=desc, dynamic_ncols=True):
                 batch = _to_device(batch, device)
-                outputs = model(batch["x"].float(), batch["direction"].float())
+                confidence = batch["confidence"].float() if use_score else None
+                outputs = model(
+                    batch["x"].float(),
+                    batch["direction"].float(),
+                    confidence,
+                )
 
                 p_t1_left = p_t1_right = None
                 p_t2_left = p_t2_right = None
@@ -263,7 +269,9 @@ def predict_multitask(
     train_cfg = config["train"]
     comp_cfg = config["competition"]
     pca_cfg = data_cfg.get("pca", {})
+    score_cfg = data_cfg.get("score", {})
     use_pca = bool(pca_cfg.get("enabled", False))
+    use_score = bool(score_cfg.get("enabled", False))
     pca_model_path = os.path.abspath(
         paths_cfg.get("pca_model_path", "") or os.path.join(paths_cfg["work_dir"], "pca_joint_model.npz")
     )
@@ -285,12 +293,18 @@ def predict_multitask(
             inputs=data_cfg["inputs"],
             root_joint=int(data_cfg["root_joint"]),
             num_frame=int(data_cfg["num_frame"]),
+            score_thr=float(data_cfg["score_thr"]),
             train=False,
             return_ssl=False,
             jitter_std=0.0,
             temporal_crop_min=1.0,
             use_pca=use_pca,
             pca_model_path=pca_model_path,
+            use_score=use_score,
+            score_clip_min=float(score_cfg.get("clip_min", 0.0)),
+            score_clip_max=float(score_cfg.get("clip_max", 1.0)),
+            score_power=float(score_cfg.get("power", 1.0)),
+            score_only_above_thr=bool(score_cfg.get("only_above_thr", True)),
         ),
     )
     loader = DataLoader(
@@ -362,6 +376,7 @@ def predict_multitask(
             device,
             collect_track1=True,
             collect_track2=True,
+            use_score=use_score,
         )
         checkpoints_payload["track1"] = ckpts
         checkpoints_payload["track2"] = ckpts
@@ -381,6 +396,7 @@ def predict_multitask(
                 device,
                 collect_track1=True,
                 collect_track2=False,
+                use_score=use_score,
             )
             checkpoints_payload["track1"] = ckpts_t1
             for fold_result in fold_results_t1:
@@ -397,6 +413,7 @@ def predict_multitask(
                 device,
                 collect_track1=False,
                 collect_track2=True,
+                use_score=use_score,
             )
             checkpoints_payload["track2"] = ckpts_t2
             for fold_result in fold_results_t2:
@@ -467,6 +484,14 @@ def predict_multitask(
                 "pca": {
                     "enabled": use_pca,
                     "model_path": pca_model_path if use_pca else "",
+                },
+                "score": {
+                    "enabled": use_score,
+                    "threshold": float(data_cfg["score_thr"]),
+                    "clip_min": float(score_cfg.get("clip_min", 0.0)),
+                    "clip_max": float(score_cfg.get("clip_max", 1.0)),
+                    "power": float(score_cfg.get("power", 1.0)),
+                    "only_above_thr": bool(score_cfg.get("only_above_thr", True)),
                 },
                 "predictions": {
                     "track1": track1_predictions,

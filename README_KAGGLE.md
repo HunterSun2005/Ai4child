@@ -33,7 +33,7 @@ python track12_main.py -c configs/track12_multitask_b0.yaml <command>
 Optional experiment directory override:
 
 ```bash
-python track12_main.py --work_dir ./workdir/aichild_track12_pca_32 <command>
+python track12_main.py --work_dir ./workdir/aichild_track12_pca_32 -c configs/track12_multitask_b0.yaml <command>
 ```
 
 With `--work_dir`, the pipeline will use:
@@ -50,22 +50,22 @@ Supported commands:
 
 ## 3. Run Commands
 
+Recommended minimal style (all behavior comes from config):
+
+```bash
+python track12_main.py -c configs/track12_multitask_b0.yaml <command>
+```
+
 ### 3.1 Preprocess
 
 ```bash
-python track12_main.py preprocess
+python track12_main.py -c configs/track12_multitask_b0.yaml preprocess
 ```
 
 Optional smoke test:
 
 ```bash
-python track12_main.py preprocess --max_clips 20
-```
-
-PCA ablation example:
-
-```bash
-python track12_main.py --work_dir ./workdir/aichild_track12_pca_32 preprocess --use_pca on --pca_components 32
+python track12_main.py -c configs/track12_multitask_b0.yaml preprocess --max_clips 20
 ```
 
 When PCA is enabled, preprocessing also fits and saves a PCA model.
@@ -73,14 +73,10 @@ When PCA is enabled, preprocessing also fits and saves a PCA model.
 ### 3.2 Train (3-fold by default)
 
 ```bash
-python track12_main.py train --cv 3
+python track12_main.py -c configs/track12_multitask_b0.yaml train
 ```
 
-PCA ablation example:
-
-```bash
-python track12_main.py --work_dir ./workdir/aichild_track12_pca_32 train --cv 3 --use_pca on --pca_components 32
-```
+`cv` comes from `train.cv_folds` in config unless overridden.
 
 Each fold now saves **two task-specific best checkpoints**:
 
@@ -93,19 +89,21 @@ Each fold now saves **two task-specific best checkpoints**:
 Predict both tracks with all available folds:
 
 ```bash
-python track12_main.py predict --folds all --task both
+python track12_main.py -c configs/track12_multitask_b0.yaml predict
 ```
+
+If `--folds/--task/--checkpoint_policy/--ensemble_topk` are omitted, it uses `predict.*` from config.
 
 Optional: only ensemble top-k folds by validation metric from `cv_summary.json`:
 
 ```bash
-python track12_main.py predict --folds all --task both --ensemble_topk 2
+python track12_main.py -c configs/track12_multitask_b0.yaml predict --ensemble_topk 2
 ```
 
 If training used PCA, prediction should use the same PCA setting:
 
 ```bash
-python track12_main.py --work_dir ./workdir/aichild_track12_pca_32 predict --folds all --task both --use_pca on --pca_components 32
+python track12_main.py --work_dir ./workdir/aichild_track12_pca_32 -c configs/track12_multitask_b0.yaml predict
 ```
 
 Default checkpoint policy is `separate`:
@@ -117,10 +115,10 @@ You can switch policy explicitly:
 
 ```bash
 # recommended: task-specific selection
-python track12_main.py predict --folds all --task both --checkpoint_policy separate
+python track12_main.py -c configs/track12_multitask_b0.yaml predict --checkpoint_policy separate
 
 # legacy behavior: both tasks use track2-selected checkpoints
-python track12_main.py predict --folds all --task both --checkpoint_policy shared
+python track12_main.py -c configs/track12_multitask_b0.yaml predict --checkpoint_policy shared
 ```
 
 Task options:
@@ -133,7 +131,7 @@ Task options:
 ### 3.4 Make Submission
 
 ```bash
-python track12_main.py make_submission
+python track12_main.py -c configs/track12_multitask_b0.yaml make_submission
 ```
 
 Default output:
@@ -168,6 +166,18 @@ PCA config:
 - `data.pca.n_components`: PCA latent dimension (for 65 keypoints, common trials: `16/24/32/48`)
 - `data.pca.fit_on`: `non_test` / `labeled` / `all`
 - `data.pca.frames_per_clip`: sampled frames per clip used to fit PCA
+
+Fold config:
+
+- `train.cv_folds`: training K-fold count (e.g. `1/3/5`)
+- `predict.folds`: which fold checkpoints to use (`all` or `1,2,3`)
+
+Score-aware graph config:
+
+- `data.score.enabled`: enable confidence-aware graph aggregation
+- `data.score.clip_min/clip_max`: normalize `keypoint_scores` to `[0,1]`
+- `data.score.power`: confidence sharpening/smoothing exponent
+- `data.score.only_above_thr`: set confidence to 0 for scores below `data.score_thr`
 
 ## 6. Troubleshooting
 

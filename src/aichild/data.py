@@ -511,12 +511,18 @@ class DatasetOptions:
     inputs: str
     root_joint: int
     num_frame: int
+    score_thr: float
     train: bool
     return_ssl: bool
     jitter_std: float
     temporal_crop_min: float
     use_pca: bool = False
     pca_model_path: str = ""
+    use_score: bool = False
+    score_clip_min: float = 0.0
+    score_clip_max: float = 1.0
+    score_power: float = 1.0
+    score_only_above_thr: bool = True
 
 
 class AichildClipDataset(Dataset):
@@ -578,30 +584,74 @@ class AichildClipDataset(Dataset):
     def __len__(self):
         return len(self.rows)
 
-    def _augment_joint(self, joint: np.ndarray) -> np.ndarray:
-        out = joint.copy()
-        _, T, _, _ = out.shape
-
-        # Random temporal crop + resize.
+    def _sample_aug_params(self, t: int) -> dict:
         min_ratio = self.options.temporal_crop_min
         if min_ratio < 1.0:
-            crop = int(random.uniform(min_ratio, 1.0) * T)
-            crop = max(8, min(crop, T))
-            start = random.randint(0, T - crop)
+            crop = int(random.uniform(min_ratio, 1.0) * t)
+            crop = max(8, min(crop, t))
+            start = random.randint(0, t - crop)
+        else:
+            crop = t
+            start = 0
+        return {
+            "crop": int(crop),
+            "start": int(start),
+            "shift": int(random.randint(-8, 8)),
+            "scale": float(random.uniform(0.95, 1.05)),
+        }
+
+    def _apply_temporal_aug(self, x: np.ndarray, params: dict) -> np.ndarray:
+        """
+        x: (C, T, V, M)
+        """
+        out = x.copy()
+        _, t, _, _ = out.shape
+        crop = int(params["crop"])
+        start = int(params["start"])
+
+        if crop < t:
             out = out[:, start : start + crop]
-            out = _resample_input_channels(out, T)
+            out = _resample_input_channels(out, t)
 
-        # Mild temporal shift.
-        shift = random.randint(-8, 8)
+        shift = int(params["shift"])
         out = np.roll(out, shift=shift, axis=1)
-
-        # Jitter on coordinates.
-        out[:2] += np.random.normal(0.0, self.options.jitter_std, size=out[:2].shape).astype(np.float32)
-
-        # Random scale.
-        scale = random.uniform(0.95, 1.05)
-        out[:2] *= scale
         return out
+
+    def _augment_joint(self, joint: np.ndarray, params: dict) -> np.ndarray:
+        out = self._apply_temporal_aug(joint, params)
+        out[:2] += np.random.normal(0.0, self.options.jitter_std, size=out[:2].shape).astype(np.float32)
+        out[:2] *= float(params["scale"])
+        return out
+
+    def _augment_confidence(self, confidence: np.ndarray, params: dict) -> np.ndarray:
+        return self._apply_temporal_aug(confidence, params)
+
+    def _build_confidence(self, score: np.ndarray) -> np.ndarray:
+        """
+        score: (1, T, V, 1), raw keypoint_scores from pose model.
+        return: (1, T, V, 1), normalized confidence in [0, 1]
+        """
+        if not self.options.use_score:
+            return np.ones_like(score, dtype=np.float32)
+
+        clip_min = float(self.options.score_clip_min)
+        clip_max = float(self.options.score_clip_max)
+        if clip_max < clip_min:
+            clip_min, clip_max = clip_max, clip_min
+
+        s = np.clip(score.astype(np.float32), clip_min, clip_max)
+        denom = max(clip_max - clip_min, 1e-6)
+        conf = (s - clip_min) / denom
+
+        power = float(self.options.score_power)
+        if abs(power - 1.0) > 1e-6:
+            conf = np.power(np.clip(conf, 0.0, 1.0), power).astype(np.float32)
+
+        if self.options.score_only_above_thr:
+            mask = score >= float(self.options.score_thr)
+            conf = np.where(mask, conf, 0.0)
+
+        return np.clip(conf, 0.0, 1.0).astype(np.float32)
 
     def _build_multi_input(self, joint: np.ndarray) -> np.ndarray:
         """
@@ -647,6 +697,11 @@ class AichildClipDataset(Dataset):
         row = self.rows[index]
         data = np.load(row["cache_path"])
         joint = data["joint"].astype(np.float32)  # (2, T, V, 1)
+        score = data["score"].astype(np.float32) if "score" in data.files else None
+        if score is None:
+            score = np.ones((1, joint.shape[1], joint.shape[2], joint.shape[3]), dtype=np.float32)
+        confidence = self._build_confidence(score)
+
         if self.options.use_pca:
             joint = self._apply_joint_pca(joint)
         expected_v = len(self.graph.connect_joint)
@@ -658,11 +713,18 @@ class AichildClipDataset(Dataset):
             )
 
         if self.options.train:
-            joint_main = self._augment_joint(joint)
-            joint_ssl = self._augment_joint(joint)
+            _, t, _, _ = joint.shape
+            aug_main = self._sample_aug_params(t)
+            aug_ssl = self._sample_aug_params(t)
+            joint_main = self._augment_joint(joint, aug_main)
+            joint_ssl = self._augment_joint(joint, aug_ssl)
+            conf_main = self._augment_confidence(confidence, aug_main)
+            conf_ssl = self._augment_confidence(confidence, aug_ssl)
         else:
             joint_main = joint
             joint_ssl = joint
+            conf_main = confidence
+            conf_ssl = confidence
 
         x = self._build_multi_input(joint_main)
         x_ssl = self._build_multi_input(joint_ssl)
@@ -686,6 +748,8 @@ class AichildClipDataset(Dataset):
         sample = {
             "x": torch.from_numpy(x),
             "x_ssl": torch.from_numpy(x_ssl),
+            "confidence": torch.from_numpy(conf_main),
+            "confidence_ssl": torch.from_numpy(conf_ssl),
             "direction": torch.from_numpy(direction),
             "track1_left": torch.from_numpy(t1_left),
             "track1_right": torch.from_numpy(t1_right),
