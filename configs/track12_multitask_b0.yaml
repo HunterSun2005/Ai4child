@@ -5,7 +5,7 @@ paths:
   submission_template: ./submissions/submission_template.csv
 
   work_dir: ./workdir/aichild_track12
-  cache_dir: ./workdir/aichild_track12/cache
+  cache_dir: ./workdir/cache
   manifest_path: ./workdir/aichild_track12/manifest.csv
   pca_model_path: ./workdir/aichild_track12/pca_joint_model.npz
   prediction_path: ./workdir/aichild_track12/predictions_multitask.json

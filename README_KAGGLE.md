@@ -36,13 +36,10 @@ Optional experiment directory override:
 python track12_main.py --work_dir ./workdir/aichild_track12_pca_32 <command>
 ```
 
-With `--work_dir`, the pipeline automatically redirects:
+With `--work_dir`, the pipeline will use:
 
-- `paths.work_dir`
-- `paths.cache_dir`
-- `paths.manifest_path`
-- `paths.pca_model_path`
-- `paths.prediction_path`
+- shared cache: `<parent_of_work_dir>/cache`
+- isolated per-experiment files in `work_dir`: checkpoints, manifest, PCA model, predictions
 
 Supported commands:
 
@@ -159,6 +156,7 @@ From `configs/track12_multitask_b0.yaml`:
 - `paths.dataset_root: ./dataset`
 - `paths.track1_label: ./train/track1_train.json`
 - `paths.track2_label: ./train/track2_train.json`
+- `paths.cache_dir: ./workdir/cache`
 - `paths.pca_model_path: ./workdir/aichild_track12/pca_joint_model.npz`
 - `paths.submission_template: ./submissions/submission_template.csv`
 - `paths.work_dir: ./workdir/aichild_track12`

@@ -28,14 +28,19 @@ def _apply_runtime_overrides(config: Dict[str, Any], args: argparse.Namespace) -
     pca_cfg = data_cfg.setdefault("pca", {})
 
     # Optional experiment directory override.
-    # When provided, all intermediate artifacts are redirected to this folder.
+    # When provided:
+    # - cache_dir is shared in "<parent_of_work_dir>/cache"
+    # - other artifacts stay isolated in the work_dir itself
     work_dir_override = str(getattr(args, "work_dir", "") or "").strip()
     if work_dir_override:
-        paths_cfg["work_dir"] = work_dir_override
-        paths_cfg["cache_dir"] = os.path.join(work_dir_override, "cache")
-        paths_cfg["manifest_path"] = os.path.join(work_dir_override, "manifest.csv")
-        paths_cfg["pca_model_path"] = os.path.join(work_dir_override, "pca_joint_model.npz")
-        paths_cfg["prediction_path"] = os.path.join(work_dir_override, "predictions_multitask.json")
+        work_dir_norm = os.path.normpath(work_dir_override)
+        default_parent = os.path.dirname(os.path.normpath(paths_cfg.get("work_dir", "./workdir")))
+        parent_dir = os.path.dirname(work_dir_norm) or default_parent or "."
+        paths_cfg["work_dir"] = work_dir_norm
+        paths_cfg["cache_dir"] = os.path.join(parent_dir, "cache")
+        paths_cfg["manifest_path"] = os.path.join(work_dir_norm, "manifest.csv")
+        paths_cfg["pca_model_path"] = os.path.join(work_dir_norm, "pca_joint_model.npz")
+        paths_cfg["prediction_path"] = os.path.join(work_dir_norm, "predictions_multitask.json")
 
     use_pca = getattr(args, "use_pca", "auto")
     if use_pca == "on":
@@ -65,7 +70,7 @@ def main() -> None:
         default="",
         help=(
             "Optional experiment directory override. "
-            "Redirects work_dir/cache/manifest/pca/prediction paths to this folder."
+            "Keeps cache in sibling shared folder '<parent>/cache' and stores other artifacts in this folder."
         ),
     )
 
