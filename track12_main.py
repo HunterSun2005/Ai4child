@@ -89,7 +89,7 @@ def main() -> None:
     )
 
     sp_train = subparsers.add_parser("train", help="Run CV training")
-    sp_train.add_argument("--cv", type=int, default=5, help="Number of CV folds")
+    sp_train.add_argument("--cv", type=int, default=3, help="Number of CV folds")
     sp_train.add_argument("--epochs", type=int, default=-1, help="Override epochs in config")
     sp_train.add_argument(
         "--use_pca",
@@ -138,6 +138,15 @@ def main() -> None:
         default=-1,
         help="Override PCA components from config (effective when PCA enabled).",
     )
+    sp_pred.add_argument(
+        "--ensemble_topk",
+        type=int,
+        default=0,
+        help=(
+            "Use top-k folds ranked by cv_summary metrics. "
+            "0 means use all selected folds."
+        ),
+    )
     sp_pred.add_argument("--output", type=str, default="", help="Prediction output json path")
 
     sp_sub = subparsers.add_parser("make_submission", help="Fill submission template")
@@ -184,6 +193,7 @@ def main() -> None:
                 output_path=args.output,
                 task=args.task,
                 checkpoint_policy=args.checkpoint_policy,
+                ensemble_topk=args.ensemble_topk,
             )
         except ImportError as exc:
             raise ModuleNotFoundError(

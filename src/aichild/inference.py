@@ -75,6 +75,72 @@ def _resolve_fold_checkpoint_map(
     return checkpoint_map
 
 
+def _load_cv_fold_metrics(work_dir: str) -> Dict[int, dict]:
+    summary_path = os.path.join(work_dir, "cv_summary.json")
+    if not os.path.exists(summary_path):
+        return {}
+    try:
+        payload = json.load(open(summary_path, "r", encoding="utf-8"))
+    except Exception as exc:
+        logging.warning("Failed to read cv summary at %s: %s", summary_path, exc)
+        return {}
+
+    fold_metrics: Dict[int, dict] = {}
+    for item in payload.get("folds", []):
+        try:
+            fid = int(item.get("fold", -1))
+        except Exception:
+            continue
+        if fid > 0:
+            fold_metrics[fid] = item
+    return fold_metrics
+
+
+def _select_topk_checkpoints(
+    checkpoint_map: Dict[int, str],
+    fold_metrics: Dict[int, dict],
+    metric_key: str,
+    topk: int,
+    target_name: str,
+) -> Dict[int, str]:
+    if topk <= 0 or len(checkpoint_map) <= 1 or topk >= len(checkpoint_map):
+        return checkpoint_map
+
+    scored = []
+    num_missing = 0
+    for fid, path in checkpoint_map.items():
+        score = None
+        metric = fold_metrics.get(fid, {})
+        value = metric.get(metric_key, None)
+        if isinstance(value, (int, float)):
+            score = float(value)
+        if score is None:
+            score = float("-inf")
+            num_missing += 1
+        scored.append((score, fid, path))
+
+    if num_missing == len(checkpoint_map):
+        logging.warning(
+            "ensemble_topk=%d requested for %s but no fold metric '%s' found. Keep all folds.",
+            topk,
+            target_name,
+            metric_key,
+        )
+        return checkpoint_map
+
+    scored = sorted(scored, key=lambda x: (x[0], -x[1]), reverse=True)
+    selected = scored[:topk]
+    selected_ids = [fid for _, fid, _ in selected]
+    logging.info(
+        "Top-k fold selection | target=%s | metric=%s | topk=%d | selected=%s",
+        target_name,
+        metric_key,
+        topk,
+        selected_ids,
+    )
+    return {fid: path for _, fid, path in sorted(selected, key=lambda x: x[1])}
+
+
 def _collect_test_rows(
     manifest: List[dict],
     task: str,
@@ -180,6 +246,7 @@ def predict_multitask(
     output_path: str = "",
     task: str = "both",
     checkpoint_policy: str = "separate",
+    ensemble_topk: int = 0,
 ) -> Dict[str, dict]:
     if torch is None or DataLoader is None:
         raise ImportError("PyTorch is required for prediction.")
@@ -188,6 +255,8 @@ def predict_multitask(
         raise ValueError(f"Unsupported task={task}")
     if checkpoint_policy not in {"shared", "separate"}:
         raise ValueError(f"Unsupported checkpoint_policy={checkpoint_policy}")
+    if int(ensemble_topk) < 0:
+        raise ValueError("ensemble_topk must be >= 0.")
 
     paths_cfg = config["paths"]
     data_cfg = config["data"]
@@ -251,6 +320,26 @@ def predict_multitask(
         track2_ckpt_map = _resolve_fold_checkpoint_map(
             work_dir, folds, preferred_name="best_track2.pt", fallback_name="best.pt"
         )
+
+    if int(ensemble_topk) > 0:
+        fold_metrics = _load_cv_fold_metrics(work_dir)
+        if task in {"track1", "both"} and track1_ckpt_map:
+            track1_metric = "best_track2_acc" if checkpoint_policy == "shared" else "best_track1_f1"
+            track1_ckpt_map = _select_topk_checkpoints(
+                track1_ckpt_map,
+                fold_metrics,
+                metric_key=track1_metric,
+                topk=int(ensemble_topk),
+                target_name="track1",
+            )
+        if task in {"track2", "both"} and track2_ckpt_map:
+            track2_ckpt_map = _select_topk_checkpoints(
+                track2_ckpt_map,
+                fold_metrics,
+                metric_key="best_track2_acc",
+                topk=int(ensemble_topk),
+                target_name="track2",
+            )
 
     merged = defaultdict(
         lambda: {
@@ -374,6 +463,7 @@ def predict_multitask(
                 "checkpoints": checkpoints_payload,
                 "task": task,
                 "checkpoint_policy": checkpoint_policy,
+                "ensemble_topk": int(ensemble_topk),
                 "pca": {
                     "enabled": use_pca,
                     "model_path": pca_model_path if use_pca else "",
@@ -388,9 +478,10 @@ def predict_multitask(
         )
 
     logging.info(
-        "Predictions saved to %s | policy=%s | pca=%s | track1_subjects=%d | track2_subjects=%d",
+        "Predictions saved to %s | policy=%s | topk=%d | pca=%s | track1_subjects=%d | track2_subjects=%d",
         output_path,
         checkpoint_policy,
+        int(ensemble_topk),
         use_pca,
         len(track1_predictions),
         len(track2_predictions),

@@ -73,16 +73,16 @@ python track12_main.py --work_dir ./workdir/aichild_track12_pca_32 preprocess --
 
 When PCA is enabled, preprocessing also fits and saves a PCA model.
 
-### 3.2 Train (5-fold by default)
+### 3.2 Train (3-fold by default)
 
 ```bash
-python track12_main.py train --cv 5
+python track12_main.py train --cv 3
 ```
 
 PCA ablation example:
 
 ```bash
-python track12_main.py --work_dir ./workdir/aichild_track12_pca_32 train --cv 5 --use_pca on --pca_components 32
+python track12_main.py --work_dir ./workdir/aichild_track12_pca_32 train --cv 3 --use_pca on --pca_components 32
 ```
 
 Each fold now saves **two task-specific best checkpoints**:
@@ -97,6 +97,12 @@ Predict both tracks with all available folds:
 
 ```bash
 python track12_main.py predict --folds all --task both
+```
+
+Optional: only ensemble top-k folds by validation metric from `cv_summary.json`:
+
+```bash
+python track12_main.py predict --folds all --task both --ensemble_topk 2
 ```
 
 If training used PCA, prediction should use the same PCA setting:
@@ -125,6 +131,7 @@ Task options:
 - `--task track1`
 - `--task track2`
 - `--task both`
+- `--ensemble_topk K` (e.g. `2`), choose top-k folds by CV metric instead of averaging all folds
 
 ### 3.4 Make Submission
 
