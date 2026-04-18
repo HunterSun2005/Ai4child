@@ -152,6 +152,18 @@ def main() -> None:
             "<0 means use config, 0 means use all selected folds."
         ),
     )
+    sp_pred.add_argument(
+        "--subject_scope",
+        type=str,
+        default=None,
+        choices=["test", "train", "all"],
+        help=(
+            "Prediction subject scope. "
+            "'test': competition test IDs only; "
+            "'train': labeled non-test IDs only; "
+            "'all': union of train and test scopes."
+        ),
+    )
     sp_pred.add_argument("--output", type=str, default="", help="Prediction output json path")
 
     sp_sub = subparsers.add_parser("make_submission", help="Fill submission template")
@@ -216,6 +228,14 @@ def main() -> None:
             if ensemble_topk < 0:
                 ensemble_topk = int(pred_cfg.get("ensemble_topk", 0))
 
+            subject_scope = (
+                args.subject_scope.strip()
+                if isinstance(args.subject_scope, str)
+                else ""
+            )
+            if not subject_scope:
+                subject_scope = str(pred_cfg.get("subject_scope", "test"))
+
             predictions = predict_multitask(
                 config,
                 folds=folds,
@@ -223,6 +243,7 @@ def main() -> None:
                 task=task,
                 checkpoint_policy=checkpoint_policy,
                 ensemble_topk=ensemble_topk,
+                subject_scope=subject_scope,
             )
         except ImportError as exc:
             raise ModuleNotFoundError(

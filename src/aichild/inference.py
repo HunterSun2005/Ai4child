@@ -141,20 +141,34 @@ def _select_topk_checkpoints(
     return {fid: path for _, fid, path in sorted(selected, key=lambda x: x[1])}
 
 
-def _collect_test_rows(
+def _collect_inference_rows(
     manifest: List[dict],
     task: str,
     track1_test_ids: set,
     track2_test_ids: set,
+    subject_scope: str,
 ) -> List[dict]:
+    if subject_scope not in {"test", "train", "all"}:
+        raise ValueError(f"Unsupported subject_scope={subject_scope}")
+
     rows = []
     for row in manifest:
-        use_track1 = task in {"track1", "both"} and (
-            row.get("is_track1_test", False) or row["subject_id"] in track1_test_ids
-        )
-        use_track2 = task in {"track2", "both"} and (
-            row.get("is_track2_test", False) or row["subject_id"] in track2_test_ids
-        )
+        sid = row["subject_id"]
+        is_track1_test = bool(row.get("is_track1_test", False) or sid in track1_test_ids)
+        is_track2_test = bool(row.get("is_track2_test", False) or sid in track2_test_ids)
+        has_track1_label = bool(row.get("has_track1_label", False))
+        has_track2_label = bool(row.get("has_track2_label", False))
+
+        if subject_scope == "test":
+            use_track1 = task in {"track1", "both"} and is_track1_test
+            use_track2 = task in {"track2", "both"} and is_track2_test
+        elif subject_scope == "train":
+            use_track1 = task in {"track1", "both"} and (not is_track1_test) and has_track1_label
+            use_track2 = task in {"track2", "both"} and (not is_track2_test) and has_track2_label
+        else:
+            use_track1 = task in {"track1", "both"} and (is_track1_test or has_track1_label)
+            use_track2 = task in {"track2", "both"} and (is_track2_test or has_track2_label)
+
         if use_track1 or use_track2:
             rows.append(row)
     return rows
@@ -253,6 +267,7 @@ def predict_multitask(
     task: str = "both",
     checkpoint_policy: str = "separate",
     ensemble_topk: int = 0,
+    subject_scope: str = "test",
 ) -> Dict[str, dict]:
     if torch is None or DataLoader is None:
         raise ImportError("PyTorch is required for prediction.")
@@ -263,6 +278,8 @@ def predict_multitask(
         raise ValueError(f"Unsupported checkpoint_policy={checkpoint_policy}")
     if int(ensemble_topk) < 0:
         raise ValueError("ensemble_topk must be >= 0.")
+    if subject_scope not in {"test", "train", "all"}:
+        raise ValueError(f"Unsupported subject_scope={subject_scope}")
 
     paths_cfg = config["paths"]
     data_cfg = config["data"]
@@ -281,13 +298,13 @@ def predict_multitask(
     track1_thr = float(comp_cfg.get("track1_threshold", 0.5))
 
     manifest = load_manifest(os.path.abspath(paths_cfg["manifest_path"]))
-    test_rows = _collect_test_rows(manifest, task, track1_test_ids, track2_test_ids)
-    if len(test_rows) == 0:
-        raise ValueError(f"No test rows found in manifest for task={task}.")
+    inference_rows = _collect_inference_rows(manifest, task, track1_test_ids, track2_test_ids, subject_scope=subject_scope)
+    if len(inference_rows) == 0:
+        raise ValueError(f"No manifest rows found for task={task}, subject_scope={subject_scope}.")
 
     graph = AichildGraph(keypoint_indices=data_cfg["keypoint_indices"])
     ds = AichildClipDataset(
-        test_rows,
+        inference_rows,
         graph,
         DatasetOptions(
             inputs=data_cfg["inputs"],
@@ -423,16 +440,41 @@ def predict_multitask(
 
     track1_predictions: Dict[str, dict] = {}
     track2_predictions: Dict[str, dict] = {}
-    track1_subject_ids = {
-        str(r["subject_id"])
-        for r in manifest
-        if r.get("is_track1_test", False) or r["subject_id"] in track1_test_ids
-    }
-    track2_subject_ids = {
-        str(r["subject_id"])
-        for r in manifest
-        if r.get("is_track2_test", False) or r["subject_id"] in track2_test_ids
-    }
+    if subject_scope == "test":
+        track1_subject_ids = {
+            str(r["subject_id"])
+            for r in manifest
+            if r.get("is_track1_test", False) or r["subject_id"] in track1_test_ids
+        }
+        track2_subject_ids = {
+            str(r["subject_id"])
+            for r in manifest
+            if r.get("is_track2_test", False) or r["subject_id"] in track2_test_ids
+        }
+    elif subject_scope == "train":
+        track1_subject_ids = {
+            str(r["subject_id"])
+            for r in manifest
+            if r.get("has_track1_label", False)
+            and not (r.get("is_track1_test", False) or r["subject_id"] in track1_test_ids)
+        }
+        track2_subject_ids = {
+            str(r["subject_id"])
+            for r in manifest
+            if r.get("has_track2_label", False)
+            and not (r.get("is_track2_test", False) or r["subject_id"] in track2_test_ids)
+        }
+    else:
+        track1_subject_ids = {
+            str(r["subject_id"])
+            for r in manifest
+            if (r.get("is_track1_test", False) or r["subject_id"] in track1_test_ids or r.get("has_track1_label", False))
+        }
+        track2_subject_ids = {
+            str(r["subject_id"])
+            for r in manifest
+            if (r.get("is_track2_test", False) or r["subject_id"] in track2_test_ids or r.get("has_track2_label", False))
+        }
 
     for sid in sorted(merged.keys()):
         sid_str = str(sid)
@@ -481,6 +523,7 @@ def predict_multitask(
                 "task": task,
                 "checkpoint_policy": checkpoint_policy,
                 "ensemble_topk": int(ensemble_topk),
+                "subject_scope": subject_scope,
                 "pca": {
                     "enabled": use_pca,
                     "model_path": pca_model_path if use_pca else "",
@@ -503,8 +546,9 @@ def predict_multitask(
         )
 
     logging.info(
-        "Predictions saved to %s | policy=%s | topk=%d | pca=%s | track1_subjects=%d | track2_subjects=%d",
+        "Predictions saved to %s | scope=%s | policy=%s | topk=%d | pca=%s | track1_subjects=%d | track2_subjects=%d",
         output_path,
+        subject_scope,
         checkpoint_policy,
         int(ensemble_topk),
         use_pca,
@@ -528,6 +572,7 @@ def predict_track2(config: dict, folds: str = "all", output_path: str = "") -> D
         output_path=output_path,
         task="track2",
         checkpoint_policy="shared",
+        subject_scope="test",
     )
     return predictions["track2"]
 
