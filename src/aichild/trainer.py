@@ -8,7 +8,7 @@ from typing import Dict, List
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from tqdm import tqdm
 
 from .data import AichildClipDataset, DatasetOptions, load_manifest
@@ -213,6 +213,7 @@ def train_cv(config: dict, cv_folds: int, max_epochs: int = -1) -> Dict[str, obj
 
     paths_cfg = config["paths"]
     train_cfg = config["train"]
+    aug_cfg = train_cfg.get("augment", {})
     data_cfg = config["data"]
     pca_cfg = data_cfg.get("pca", {})
     score_cfg = data_cfg.get("score", {})
@@ -255,6 +256,16 @@ def train_cv(config: dict, cv_folds: int, max_epochs: int = -1) -> Dict[str, obj
         float(score_cfg.get("power", 1.0)),
         bool(score_cfg.get("only_above_thr", True)),
     )
+    logging.info(
+        "Aug setting | time=%s | spatial=%s | conf=%s | flip=%s(%.2f) | rare=%s(str=%.2f)",
+        bool(aug_cfg.get("enable_time_aug", True)),
+        bool(aug_cfg.get("enable_spatial_aug", True)),
+        bool(aug_cfg.get("enable_conf_aug", True)),
+        bool(aug_cfg.get("enable_lr_flip", False)),
+        float(aug_cfg.get("flip_prob", 0.0)),
+        bool(aug_cfg.get("enable_rare_aug", True)),
+        float(aug_cfg.get("rare_strength", 1.5)),
+    )
 
     fold_summaries = []
     for fold_idx, val_subjects in enumerate(folds, start=1):
@@ -278,6 +289,24 @@ def train_cv(config: dict, cv_folds: int, max_epochs: int = -1) -> Dict[str, obj
             score_clip_max=float(score_cfg.get("clip_max", 1.0)),
             score_power=float(score_cfg.get("power", 1.0)),
             score_only_above_thr=bool(score_cfg.get("only_above_thr", True)),
+            enable_time_aug=bool(aug_cfg.get("enable_time_aug", True)),
+            temporal_shift_max=int(aug_cfg.get("temporal_shift_max", 8)),
+            speed_min=float(aug_cfg.get("speed_min", 0.9)),
+            speed_max=float(aug_cfg.get("speed_max", 1.1)),
+            enable_spatial_aug=bool(aug_cfg.get("enable_spatial_aug", True)),
+            rotate_deg=float(aug_cfg.get("rotate_deg", 6.0)),
+            translate_std=float(aug_cfg.get("translate_std", 0.01)),
+            scale_min=float(aug_cfg.get("scale_min", 0.95)),
+            scale_max=float(aug_cfg.get("scale_max", 1.05)),
+            enable_conf_aug=bool(aug_cfg.get("enable_conf_aug", True)),
+            conf_noise_std=float(aug_cfg.get("conf_noise_std", 0.02)),
+            conf_drop_prob=float(aug_cfg.get("conf_drop_prob", 0.05)),
+            conf_low_boost=float(aug_cfg.get("conf_low_boost", 0.20)),
+            enable_lr_flip=bool(aug_cfg.get("enable_lr_flip", False)),
+            flip_prob=float(aug_cfg.get("flip_prob", 0.0)),
+            enable_rare_aug=bool(aug_cfg.get("enable_rare_aug", True)),
+            rare_track2_indices=tuple(int(x) for x in aug_cfg.get("rare_track2_indices", [3, 4])),
+            rare_strength=float(aug_cfg.get("rare_strength", 1.5)),
         )
         val_opts = DatasetOptions(
             inputs=data_cfg["inputs"],
@@ -295,15 +324,41 @@ def train_cv(config: dict, cv_folds: int, max_epochs: int = -1) -> Dict[str, obj
             score_clip_max=float(score_cfg.get("clip_max", 1.0)),
             score_power=float(score_cfg.get("power", 1.0)),
             score_only_above_thr=bool(score_cfg.get("only_above_thr", True)),
+            enable_time_aug=False,
+            enable_spatial_aug=False,
+            enable_conf_aug=False,
+            enable_lr_flip=False,
+            enable_rare_aug=False,
         )
 
         train_ds = AichildClipDataset(train_rows, graph, train_opts)
         val_ds = AichildClipDataset(val_rows, graph, val_opts)
 
+        sampler = None
+        if bool(train_cfg.get("use_track2_weighted_sampler", True)):
+            class_weights_cfg = train_cfg.get("track2_class_weights", {})
+            default_w = float(train_cfg.get("track2_sampler_default_weight", 1.0))
+            weights = []
+            for r in train_rows:
+                if r.get("has_track2_label", False):
+                    l = int(r["track2_left"])
+                    rr = int(r["track2_right"])
+                    lw = float(class_weights_cfg.get(str(l), default_w))
+                    rw = float(class_weights_cfg.get(str(rr), default_w))
+                    weights.append(max(1e-6, 0.5 * (lw + rw)))
+                else:
+                    weights.append(max(1e-6, float(train_cfg.get("track2_sampler_unlabeled_weight", 0.8))))
+            sampler = WeightedRandomSampler(
+                weights=torch.as_tensor(weights, dtype=torch.double),
+                num_samples=len(weights),
+                replacement=True,
+            )
+
         train_loader = DataLoader(
             train_ds,
             batch_size=int(train_cfg["batch_size"]),
-            shuffle=True,
+            shuffle=(sampler is None),
+            sampler=sampler,
             num_workers=int(train_cfg["num_workers"]),
             drop_last=False,
             pin_memory=torch.cuda.is_available(),

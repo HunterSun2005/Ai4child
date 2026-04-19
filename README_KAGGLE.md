@@ -179,6 +179,19 @@ Score-aware graph config:
 - `data.score.power`: confidence sharpening/smoothing exponent
 - `data.score.only_above_thr`: set confidence to 0 for scores below `data.score_thr`
 
+Track2-focused augmentation config (`train.augment`):
+
+- Temporal: random crop-resample, shift, and speed perturbation
+- Spatial: small rotation/translation/scale on joint coordinates
+- Confidence: confidence noise + random/low-confidence dropout
+- Left-right flip: horizontal flip with automatic `left/right` label swap and direction swap
+- Rare-class boost: stronger augmentation for selected Track2 classes (default `type4/WNL`)
+
+Sampler config:
+
+- `train.use_track2_weighted_sampler`: enable class-aware weighted sampling
+- `train.track2_class_weights`: class-level sampling weight map for Track2 labels
+
 ## 6. Troubleshooting
 
 - `Prediction requires PyTorch`

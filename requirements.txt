@@ -1,0 +1,18 @@
+# Core scientific stack
+numpy>=1.23
+pandas>=1.5
+pyyaml>=6.0
+tqdm>=4.64
+
+# Deep learning
+# For CUDA training, install the proper PyTorch build for your server GPU/driver.
+# Example (CUDA 12.1): pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+torch>=2.0
+
+# Visualization / utilities
+matplotlib>=3.7
+seaborn>=0.12
+opencv-python>=4.8
+tensorboardX>=2.6
+thop>=0.1.1.post2209072238
+nvidia-ml-py3>=7.352.0

@@ -21,6 +21,33 @@ except Exception:  # pragma: no cover - allows preprocess-only usage without tor
 from .constants import DIRECTION_TO_INDEX, TRACK2_LABEL_TO_INDEX
 from .graph import AichildGraph
 
+_COCO_WHOLEBODY_LR_PAIRS = {
+    1: 2, 2: 1,
+    3: 4, 4: 3,
+    5: 6, 6: 5,
+    7: 8, 8: 7,
+    9: 10, 10: 9,
+    11: 12, 12: 11,
+    13: 14, 14: 13,
+    15: 16, 16: 15,
+    17: 20, 20: 17,
+    18: 21, 21: 18,
+    19: 22, 22: 19,
+}
+for k in range(21):
+    _COCO_WHOLEBODY_LR_PAIRS[91 + k] = 112 + k
+    _COCO_WHOLEBODY_LR_PAIRS[112 + k] = 91 + k
+
+
+def _build_lr_flip_index(keypoint_indices: List[int]) -> np.ndarray:
+    local_of = {orig: i for i, orig in enumerate(keypoint_indices)}
+    flip_index = np.arange(len(keypoint_indices), dtype=np.int64)
+    for orig_idx, local_idx in local_of.items():
+        pair_orig = _COCO_WHOLEBODY_LR_PAIRS.get(orig_idx, orig_idx)
+        pair_local = local_of.get(pair_orig, local_idx)
+        flip_index[local_idx] = pair_local
+    return flip_index
+
 
 def _ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
@@ -523,6 +550,29 @@ class DatasetOptions:
     score_clip_max: float = 1.0
     score_power: float = 1.0
     score_only_above_thr: bool = True
+    # Temporal augmentation.
+    enable_time_aug: bool = True
+    temporal_shift_max: int = 8
+    speed_min: float = 0.9
+    speed_max: float = 1.1
+    # Spatial augmentation.
+    enable_spatial_aug: bool = True
+    rotate_deg: float = 6.0
+    translate_std: float = 0.01
+    scale_min: float = 0.95
+    scale_max: float = 1.05
+    # Confidence augmentation.
+    enable_conf_aug: bool = True
+    conf_noise_std: float = 0.02
+    conf_drop_prob: float = 0.05
+    conf_low_boost: float = 0.20
+    # Left-right flip augmentation.
+    enable_lr_flip: bool = False
+    flip_prob: float = 0.0
+    # Rare-class augmentation (track2).
+    enable_rare_aug: bool = False
+    rare_track2_indices: Tuple[int, ...] = (3, 4)
+    rare_strength: float = 1.5
 
 
 class AichildClipDataset(Dataset):
@@ -531,6 +581,7 @@ class AichildClipDataset(Dataset):
         self.graph = graph
         self.options = options
         self.pca_model = None
+        self.lr_flip_index = _build_lr_flip_index(graph.keypoint_indices)
         if self.options.use_pca:
             self.pca_model = self._load_pca_model(self.options.pca_model_path)
 
@@ -584,8 +635,18 @@ class AichildClipDataset(Dataset):
     def __len__(self):
         return len(self.rows)
 
-    def _sample_aug_params(self, t: int) -> dict:
-        min_ratio = self.options.temporal_crop_min
+    def _is_rare_track2_row(self, row: dict) -> bool:
+        if not self.options.enable_rare_aug:
+            return False
+        if not row.get("has_track2_label", False):
+            return False
+        rare_set = set(int(x) for x in self.options.rare_track2_indices)
+        return int(row["track2_left"]) in rare_set or int(row["track2_right"]) in rare_set
+
+    def _sample_aug_params(self, t: int, rare_factor: float = 1.0) -> dict:
+        min_ratio = float(self.options.temporal_crop_min)
+        if rare_factor > 1.0:
+            min_ratio = max(0.55, min_ratio - 0.08 * (rare_factor - 1.0))
         if min_ratio < 1.0:
             crop = int(random.uniform(min_ratio, 1.0) * t)
             crop = max(8, min(crop, t))
@@ -593,17 +654,80 @@ class AichildClipDataset(Dataset):
         else:
             crop = t
             start = 0
+
+        shift_max = max(0, int(round(float(self.options.temporal_shift_max) * rare_factor)))
+        shift = int(random.randint(-shift_max, shift_max)) if shift_max > 0 else 0
+
+        speed_min = float(self.options.speed_min)
+        speed_max = float(self.options.speed_max)
+        if speed_max < speed_min:
+            speed_min, speed_max = speed_max, speed_min
+        if rare_factor > 1.0:
+            center = 0.5 * (speed_min + speed_max)
+            half = 0.5 * (speed_max - speed_min) * rare_factor
+            speed_min = max(0.5, center - half)
+            speed_max = min(1.5, center + half)
+        speed = float(random.uniform(speed_min, speed_max))
+
+        scale_min = float(self.options.scale_min)
+        scale_max = float(self.options.scale_max)
+        if scale_max < scale_min:
+            scale_min, scale_max = scale_max, scale_min
+        if rare_factor > 1.0:
+            center = 0.5 * (scale_min + scale_max)
+            half = 0.5 * (scale_max - scale_min) * rare_factor
+            scale_min = max(0.8, center - half)
+            scale_max = min(1.2, center + half)
+        scale = float(random.uniform(scale_min, scale_max))
+
+        rotate_deg = float(self.options.rotate_deg) * rare_factor
+        rotate_rad = np.deg2rad(float(random.uniform(-rotate_deg, rotate_deg)))
+        translate_std = float(self.options.translate_std) * rare_factor
+        translate_x = float(np.random.normal(0.0, translate_std))
+        translate_y = float(np.random.normal(0.0, translate_std))
+
+        jitter_std = float(self.options.jitter_std) * rare_factor
+        conf_drop_prob = min(0.6, float(self.options.conf_drop_prob) * rare_factor)
+
         return {
             "crop": int(crop),
             "start": int(start),
-            "shift": int(random.randint(-8, 8)),
-            "scale": float(random.uniform(0.95, 1.05)),
+            "shift": shift,
+            "speed": speed,
+            "scale": scale,
+            "rotate_rad": rotate_rad,
+            "translate_x": translate_x,
+            "translate_y": translate_y,
+            "jitter_std": jitter_std,
+            "conf_drop_prob": conf_drop_prob,
         }
+
+    def _apply_speed_aug(self, x: np.ndarray, speed: float) -> np.ndarray:
+        if abs(float(speed) - 1.0) <= 1e-6:
+            return x
+        c, t, v, m = x.shape
+        src_idx = np.arange(t, dtype=np.float32)
+        tgt_idx = np.arange(t, dtype=np.float32)
+        center = 0.5 * (t - 1)
+        sample_idx = (tgt_idx - center) / float(speed) + center
+        sample_idx = np.clip(sample_idx, 0.0, float(t - 1))
+        out = np.zeros_like(x, dtype=np.float32)
+        for ci in range(c):
+            for vi in range(v):
+                for mi in range(m):
+                    out[ci, :, vi, mi] = np.interp(
+                        sample_idx,
+                        src_idx,
+                        x[ci, :, vi, mi],
+                    )
+        return out.astype(np.float32)
 
     def _apply_temporal_aug(self, x: np.ndarray, params: dict) -> np.ndarray:
         """
         x: (C, T, V, M)
         """
+        if not self.options.enable_time_aug:
+            return x.copy()
         out = x.copy()
         _, t, _, _ = out.shape
         crop = int(params["crop"])
@@ -615,16 +739,71 @@ class AichildClipDataset(Dataset):
 
         shift = int(params["shift"])
         out = np.roll(out, shift=shift, axis=1)
-        return out
+        out = self._apply_speed_aug(out, float(params["speed"]))
+        return out.astype(np.float32)
+
+    def _apply_spatial_aug(self, joint: np.ndarray, params: dict) -> np.ndarray:
+        out = joint.copy()
+        if not self.options.enable_spatial_aug:
+            return out
+        rad = float(params["rotate_rad"])
+        cos_t = float(np.cos(rad))
+        sin_t = float(np.sin(rad))
+        x = out[0].copy()
+        y = out[1].copy()
+        x_new = cos_t * x - sin_t * y
+        y_new = sin_t * x + cos_t * y
+        out[0] = x_new
+        out[1] = y_new
+        out[0] = out[0] * float(params["scale"]) + float(params["translate_x"])
+        out[1] = out[1] * float(params["scale"]) + float(params["translate_y"])
+        return out.astype(np.float32)
 
     def _augment_joint(self, joint: np.ndarray, params: dict) -> np.ndarray:
         out = self._apply_temporal_aug(joint, params)
-        out[:2] += np.random.normal(0.0, self.options.jitter_std, size=out[:2].shape).astype(np.float32)
-        out[:2] *= float(params["scale"])
-        return out
+        out = self._apply_spatial_aug(out, params)
+        jitter_std = float(params.get("jitter_std", self.options.jitter_std))
+        if jitter_std > 0:
+            out[:2] += np.random.normal(0.0, jitter_std, size=out[:2].shape).astype(np.float32)
+        return out.astype(np.float32)
 
     def _augment_confidence(self, confidence: np.ndarray, params: dict) -> np.ndarray:
-        return self._apply_temporal_aug(confidence, params)
+        out = self._apply_temporal_aug(confidence, params)
+        if self.options.enable_conf_aug:
+            noise_std = float(self.options.conf_noise_std)
+            if noise_std > 0:
+                out += np.random.normal(0.0, noise_std, size=out.shape).astype(np.float32)
+
+            drop_prob = float(params.get("conf_drop_prob", self.options.conf_drop_prob))
+            if drop_prob > 0:
+                drop = np.random.rand(*out.shape) < drop_prob
+                out[drop] = 0.0
+
+            low_boost = float(self.options.conf_low_boost)
+            if low_boost > 0:
+                low_prob = np.clip((1.0 - out) * low_boost, 0.0, 1.0)
+                low_mask = np.random.rand(*out.shape) < low_prob
+                out[low_mask] = 0.0
+        return np.clip(out, 0.0, 1.0).astype(np.float32)
+
+    def _apply_lr_flip_joint(self, joint: np.ndarray) -> np.ndarray:
+        out = joint.copy()
+        out[0] = -out[0]
+        out = out[:, :, self.lr_flip_index, :]
+        return out.astype(np.float32)
+
+    def _apply_lr_flip_confidence(self, confidence: np.ndarray) -> np.ndarray:
+        out = confidence.copy()
+        out = out[:, :, self.lr_flip_index, :]
+        return out.astype(np.float32)
+
+    def _swap_direction_lr(self, direction_idx: int) -> int:
+        # 0: forward, 1: backward, 2: left, 3: right
+        if direction_idx == 2:
+            return 3
+        if direction_idx == 3:
+            return 2
+        return direction_idx
 
     def _build_confidence(self, score: np.ndarray) -> np.ndarray:
         """
@@ -712,10 +891,35 @@ class AichildClipDataset(Dataset):
                 "Please rerun preprocess with --overwrite after changing keypoint_indices."
             )
 
+        direction_idx = int(row["direction_idx"])
+
+        t1_left = np.zeros((17,), dtype=np.float32)
+        t1_right = np.zeros((17,), dtype=np.float32)
+        if row["has_track1_label"]:
+            t1_left[:] = np.asarray(row["track1_left"], dtype=np.float32)
+            t1_right[:] = np.asarray(row["track1_right"], dtype=np.float32)
+
+        t2_left = int(row["track2_left"]) if row["has_track2_label"] else 0
+        t2_right = int(row["track2_right"]) if row["has_track2_label"] else 0
+
+        rare_factor = float(self.options.rare_strength) if self._is_rare_track2_row(row) else 1.0
+        do_flip = False
+        if self.options.train and self.options.enable_lr_flip:
+            flip_prob = float(self.options.flip_prob)
+            if rare_factor > 1.0:
+                flip_prob = min(1.0, flip_prob * rare_factor)
+            do_flip = random.random() < flip_prob
+        if do_flip:
+            joint = self._apply_lr_flip_joint(joint)
+            confidence = self._apply_lr_flip_confidence(confidence)
+            direction_idx = self._swap_direction_lr(direction_idx)
+            t1_left, t1_right = t1_right.copy(), t1_left.copy()
+            t2_left, t2_right = int(t2_right), int(t2_left)
+
         if self.options.train:
             _, t, _, _ = joint.shape
-            aug_main = self._sample_aug_params(t)
-            aug_ssl = self._sample_aug_params(t)
+            aug_main = self._sample_aug_params(t, rare_factor=rare_factor)
+            aug_ssl = self._sample_aug_params(t, rare_factor=rare_factor)
             joint_main = self._augment_joint(joint, aug_main)
             joint_ssl = self._augment_joint(joint, aug_ssl)
             conf_main = self._augment_confidence(confidence, aug_main)
@@ -729,21 +933,11 @@ class AichildClipDataset(Dataset):
         x = self._build_multi_input(joint_main)
         x_ssl = self._build_multi_input(joint_ssl)
 
-        direction_idx = int(row["direction_idx"])
         direction = np.zeros((4,), dtype=np.float32)
         direction[direction_idx] = 1.0
 
         t1_mask = 1.0 if row["has_track1_label"] else 0.0
         t2_mask = 1.0 if row["has_track2_label"] else 0.0
-
-        t1_left = np.zeros((17,), dtype=np.float32)
-        t1_right = np.zeros((17,), dtype=np.float32)
-        if row["has_track1_label"]:
-            t1_left[:] = np.asarray(row["track1_left"], dtype=np.float32)
-            t1_right[:] = np.asarray(row["track1_right"], dtype=np.float32)
-
-        t2_left = int(row["track2_left"]) if row["has_track2_label"] else 0
-        t2_right = int(row["track2_right"]) if row["has_track2_label"] else 0
 
         sample = {
             "x": torch.from_numpy(x),
