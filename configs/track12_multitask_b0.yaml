@@ -129,9 +129,13 @@ train:
 
   jitter_std: 0.01
   temporal_crop_min: 0.75
+  task_loader_mode: separate
+  track2_cv_strategy: stratified_holdout_singletons
+  track2_singleton_min_count: 2
+  use_track2_loss_weights: true
   use_track2_weighted_sampler: true
   track2_sampler_default_weight: 1.0
-  track2_sampler_unlabeled_weight: 0.8
+  track2_sampler_unlabeled_weight: 0.05
   # class index -> sampler weight (type1..WNL = 0..4)
   track2_class_weights:
     "0": 1.2
